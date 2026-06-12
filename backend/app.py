@@ -1,4 +1,6 @@
 import os
+from datetime import timedelta
+from functools import wraps
 
 import mysql.connector
 from dotenv import load_dotenv
@@ -8,7 +10,15 @@ from flask_cors import CORS
 
 load_dotenv()
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+
+# Sécurité de la session utilisateur
+app.config.update(
+    SECRET_KEY=os.getenv("SECRET_KEY"),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.getenv("APP_ENV") == "production",
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+)
 
 # Communication avec le frontend React pendant le développement.
 CORS(
@@ -27,6 +37,18 @@ def get_db_connection():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
     )
+
+
+# Protection des routes réservées aux utilisateurs connectés
+def login_required(route):
+    @wraps(route)
+    def protected_route(*args, **kwargs):
+        if session.get("user_id") is None:
+            return jsonify({"message": "Authentification requise"}), 401
+
+        return route(*args, **kwargs)
+
+    return protected_route
 
 
 # Routes de diagnostic
@@ -86,6 +108,7 @@ def login():
         return jsonify({"message": "Identifiants incorrects"}), 401
 
     session.clear()
+    session.permanent = True
     session["user_id"] = user["Id_utilisateur"]
 
     return jsonify({
@@ -102,11 +125,9 @@ def login():
 
 # Lecture de la session active
 @app.get("/api/me")
+@login_required
 def get_current_user():
     user_id = session.get("user_id")
-
-    if user_id is None:
-        return jsonify({"message": "Aucun utilisateur connecte"}), 401
 
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
