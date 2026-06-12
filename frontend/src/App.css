@@ -143,7 +143,41 @@
 }
 
 .login-card {
-  width: min(100%, 460px);
+  width: min(100%, 500px);
+}
+
+.auth-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  border: 1px solid #d9e2eb;
+  border-radius: 12px;
+  margin-bottom: 30px;
+  padding: 4px;
+  background: #eaf0f5;
+}
+
+.auth-tabs button {
+  min-height: 42px;
+  border: 0;
+  border-radius: 8px;
+  color: #6b7b8b;
+  background: transparent;
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.auth-tabs button.active {
+  color: #0d4f50;
+  background: #ffffff;
+  box-shadow: 0 3px 12px rgba(18, 48, 69, 0.08);
+}
+
+.auth-tabs button:focus-visible {
+  outline: 2px solid #168a80;
+  outline-offset: 2px;
 }
 
 .form-heading {
@@ -168,6 +202,16 @@
 form {
   display: grid;
   gap: 22px;
+}
+
+.register-form {
+  gap: 17px;
+}
+
+.name-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
 }
 
 .field {
@@ -235,6 +279,10 @@ form {
   padding-right: 16px;
 }
 
+.input-wrapper.no-icon input {
+  padding-inline: 16px;
+}
+
 .input-wrapper input::placeholder {
   color: #9aa7b4;
 }
@@ -269,6 +317,31 @@ form {
   border-radius: 5px;
   outline: 2px solid #168a80;
   outline-offset: 2px;
+}
+
+.field-hint {
+  margin: 0;
+  color: #7d8996;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.consent-field {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #667789;
+  font-size: 0.77rem;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.consent-field input {
+  width: 17px;
+  height: 17px;
+  flex: 0 0 17px;
+  margin: 2px 0 0;
+  accent-color: #168a80;
 }
 
 .submit-button {
@@ -472,6 +545,10 @@ form {
 
   .form-heading h2 {
     font-size: 2rem;
+  }
+
+  .name-fields {
+    grid-template-columns: 1fr;
   }
 }
 

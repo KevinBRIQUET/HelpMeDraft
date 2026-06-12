@@ -3,8 +3,13 @@ import "./App.css"
 
 function App() {
   // Données du formulaire et état de l'interface
+  const [authMode, setAuthMode] = useState("login")
+  const [firstName, setFirstName] = useState("")
+  const [lastName, setLastName] = useState("")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
+  const [passwordConfirmation, setPasswordConfirmation] = useState("")
+  const [consent, setConsent] = useState(false)
   const [message, setMessage] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [isSuccess, setIsSuccess] = useState(false)
@@ -33,21 +38,49 @@ function App() {
     checkSession()
   }, [])
 
-  // Envoie les identifiants au backend.
+  // Bascule entre connexion et inscription en réinitialisant le formulaire.
+  function changeAuthMode(mode) {
+    setAuthMode(mode)
+    setFirstName("")
+    setLastName("")
+    setEmail("")
+    setPassword("")
+    setPasswordConfirmation("")
+    setConsent(false)
+    setMessage("")
+    setIsSuccess(false)
+    setShowPassword(false)
+  }
+
+  // Envoie les données au bon endpoint selon le formulaire affiché.
   async function handleSubmit(event) {
     event.preventDefault()
-    setMessage("Connexion en cours...")
+    const isRegistering = authMode === "register"
+
+    setMessage(isRegistering ? "Création du compte..." : "Connexion en cours...")
     setIsLoading(true)
     setIsSuccess(false)
 
     try {
-      const response = await fetch("http://localhost:5000/api/login", {
+      const endpoint = isRegistering ? "/api/register" : "/api/login"
+      const body = isRegistering
+        ? {
+            prenom: firstName,
+            nom: lastName,
+            email,
+            password,
+            passwordConfirmation,
+            consent,
+          }
+        : { email, password }
+
+      const response = await fetch(`http://localhost:5000${endpoint}`, {
         method: "POST",
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify(body),
       })
 
       const data = await response.json()
@@ -82,8 +115,13 @@ function App() {
       }
 
       setUser(null)
+      setAuthMode("login")
+      setFirstName("")
+      setLastName("")
       setEmail("")
       setPassword("")
+      setPasswordConfirmation("")
+      setConsent(false)
       setMessage("")
       setIsSuccess(false)
     } catch {
@@ -158,13 +196,81 @@ function App() {
             </div>
           ) : (
             <>
-              <div className="form-heading">
-                <p className="eyebrow">Espace personnel</p>
-                <h2>Bon retour parmi nous</h2>
-                <p>Connectez-vous pour retrouver vos documents.</p>
+              <div className="auth-tabs" aria-label="Choix du formulaire">
+                <button
+                  type="button"
+                  className={authMode === "login" ? "active" : ""}
+                  onClick={() => changeAuthMode("login")}
+                  aria-pressed={authMode === "login"}
+                >
+                  Connexion
+                </button>
+                <button
+                  type="button"
+                  className={authMode === "register" ? "active" : ""}
+                  onClick={() => changeAuthMode("register")}
+                  aria-pressed={authMode === "register"}
+                >
+                  Créer un compte
+                </button>
               </div>
 
-              <form onSubmit={handleSubmit}>
+              <div className="form-heading">
+                <p className="eyebrow">Espace personnel</p>
+                <h2>
+                  {authMode === "login"
+                    ? "Bon retour parmi nous"
+                    : "Créez votre espace"}
+                </h2>
+                <p>
+                  {authMode === "login"
+                    ? "Connectez-vous pour retrouver vos documents."
+                    : "Commencez à rédiger et organiser vos documents."}
+                </p>
+              </div>
+
+              <form
+                className={authMode === "register" ? "register-form" : ""}
+                onSubmit={handleSubmit}
+              >
+                {authMode === "register" && (
+                  <div className="name-fields">
+                    <div className="field">
+                      <label htmlFor="firstName">Prénom</label>
+                      <div className="input-wrapper no-icon">
+                        <input
+                          id="firstName"
+                          name="firstName"
+                          type="text"
+                          autoComplete="given-name"
+                          placeholder="Votre prénom"
+                          maxLength="50"
+                          value={firstName}
+                          onChange={(event) => setFirstName(event.target.value)}
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="lastName">Nom</label>
+                      <div className="input-wrapper no-icon">
+                        <input
+                          id="lastName"
+                          name="lastName"
+                          type="text"
+                          autoComplete="family-name"
+                          placeholder="Votre nom"
+                          maxLength="50"
+                          value={lastName}
+                          onChange={(event) => setLastName(event.target.value)}
+                          required
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="field">
                   <label htmlFor="email">Adresse e-mail</label>
                   <div className="input-wrapper">
@@ -190,8 +296,13 @@ function App() {
                       id="password"
                       name="password"
                       type={showPassword ? "text" : "password"}
-                      autoComplete="current-password"
+                      autoComplete={
+                        authMode === "register"
+                          ? "new-password"
+                          : "current-password"
+                      }
                       placeholder="Votre mot de passe"
+                      minLength={authMode === "register" ? 8 : undefined}
                       value={password}
                       onChange={(event) => setPassword(event.target.value)}
                       required
@@ -209,14 +320,67 @@ function App() {
                       {showPassword ? "Masquer" : "Afficher"}
                     </button>
                   </div>
+                  {authMode === "register" && (
+                    <p className="field-hint">
+                      8 caractères minimum, avec majuscule, minuscule et chiffre.
+                    </p>
+                  )}
                 </div>
+
+                {authMode === "register" && (
+                  <>
+                    <div className="field">
+                      <label htmlFor="passwordConfirmation">
+                        Confirmer le mot de passe
+                      </label>
+                      <div className="input-wrapper">
+                        <span
+                          className="input-icon lock-icon"
+                          aria-hidden="true"
+                        />
+                        <input
+                          id="passwordConfirmation"
+                          name="passwordConfirmation"
+                          type={showPassword ? "text" : "password"}
+                          autoComplete="new-password"
+                          placeholder="Saisissez-le à nouveau"
+                          minLength="8"
+                          value={passwordConfirmation}
+                          onChange={(event) =>
+                            setPasswordConfirmation(event.target.value)
+                          }
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <label className="consent-field">
+                      <input
+                        type="checkbox"
+                        checked={consent}
+                        onChange={(event) => setConsent(event.target.checked)}
+                        required
+                      />
+                      <span>
+                        J’accepte les conditions d’utilisation et le traitement
+                        de mes données pour créer mon compte.
+                      </span>
+                    </label>
+                  </>
+                )}
 
                 <button
                   className="submit-button"
                   type="submit"
                   disabled={isLoading}
                 >
-                  {isLoading ? "Connexion..." : "Se connecter"}
+                  {isLoading
+                    ? authMode === "register"
+                      ? "Création..."
+                      : "Connexion..."
+                    : authMode === "register"
+                      ? "Créer mon compte"
+                      : "Se connecter"}
                   {!isLoading && <span aria-hidden="true">→</span>}
                 </button>
               </form>
