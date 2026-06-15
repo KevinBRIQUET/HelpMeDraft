@@ -460,6 +460,267 @@ def delete_folder(folder_id):
     return jsonify({"message": "Dossier supprimé avec succès"}), 200
 
 
+# Gestion des documents
+@app.get("/api/documents")
+@login_required
+def get_documents():
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT
+            doc.Id_document AS id,
+            doc.titre,
+            LEFT(doc.contenu, 180) AS extrait,
+            DATE_FORMAT(doc.derniere_modification, '%d/%m/%Y à %H:%i')
+                AS derniere_modification,
+            d.Id_dossier AS dossier_id,
+            d.nom AS dossier_nom
+        FROM document doc
+        LEFT JOIN dossier d ON d.Id_dossier = doc.Id_dossier
+        WHERE doc.Id_utilisateur = %s
+        ORDER BY doc.derniere_modification DESC, doc.Id_document DESC
+        """,
+        (user_id,),
+    )
+
+    documents = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({"documents": documents}), 200
+
+
+@app.post("/api/documents")
+@login_required
+def create_document():
+    user_id = session.get("user_id")
+    data = request.get_json(silent=True) or {}
+
+    title = data.get("title", "").strip()
+    content = data.get("content", "")
+    folder_id = data.get("folderId")
+
+    if not title:
+        return jsonify({"message": "Le titre du document est obligatoire"}), 400
+
+    if len(title) > 255:
+        return jsonify({
+            "message": "Le titre ne doit pas dépasser 255 caractères",
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    if folder_id is not None:
+        cursor.execute(
+            """
+            SELECT Id_dossier
+            FROM dossier
+            WHERE Id_dossier = %s AND Id_utilisateur = %s
+            """,
+            (folder_id, user_id),
+        )
+
+        if cursor.fetchone() is None:
+            cursor.close()
+            connection.close()
+            return jsonify({"message": "Dossier introuvable"}), 404
+
+    cursor.execute(
+        """
+        INSERT INTO document
+            (titre, contenu, date_creation, derniere_modification,
+             Id_dossier, Id_utilisateur)
+        VALUES (%s, %s, NOW(), NOW(), %s, %s)
+        """,
+        (title, content, folder_id, user_id),
+    )
+    connection.commit()
+    document_id = cursor.lastrowid
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Document créé avec succès",
+        "document": {
+            "id": document_id,
+            "titre": title,
+            "extrait": content[:180],
+            "dossier_id": folder_id,
+        },
+    }), 201
+
+
+@app.get("/api/documents/<int:document_id>")
+@login_required
+def get_document(document_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT
+            doc.Id_document AS id,
+            doc.titre,
+            doc.contenu,
+            doc.Id_dossier AS dossier_id,
+            DATE_FORMAT(doc.derniere_modification, '%d/%m/%Y à %H:%i')
+                AS derniere_modification
+        FROM document doc
+        WHERE doc.Id_document = %s AND doc.Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+
+    document = cursor.fetchone()
+
+    cursor.close()
+    connection.close()
+
+    if document is None:
+        return jsonify({"message": "Document introuvable"}), 404
+
+    return jsonify({"document": document}), 200
+
+
+@app.patch("/api/documents/<int:document_id>")
+@login_required
+def update_document(document_id):
+    user_id = session.get("user_id")
+    data = request.get_json(silent=True) or {}
+
+    title = data.get("title", "").strip()
+    content = data.get("content", "")
+    folder_id = data.get("folderId")
+
+    if not title:
+        return jsonify({"message": "Le titre du document est obligatoire"}), 400
+
+    if len(title) > 255:
+        return jsonify({
+            "message": "Le titre ne doit pas dépasser 255 caractères",
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    # Vérifie le propriétaire avant la mise à jour. Cela évite de confondre
+    # un document introuvable avec un enregistrement sans changement.
+    cursor.execute(
+        """
+        SELECT Id_document
+        FROM document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+
+    if cursor.fetchone() is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Document introuvable"}), 404
+
+    if folder_id is not None:
+        cursor.execute(
+            """
+            SELECT Id_dossier
+            FROM dossier
+            WHERE Id_dossier = %s AND Id_utilisateur = %s
+            """,
+            (folder_id, user_id),
+        )
+
+        if cursor.fetchone() is None:
+            cursor.close()
+            connection.close()
+            return jsonify({"message": "Dossier introuvable"}), 404
+
+    cursor.execute(
+        """
+        UPDATE document
+        SET titre = %s,
+            contenu = %s,
+            Id_dossier = %s,
+            derniere_modification = NOW()
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (title, content, folder_id, document_id, user_id),
+    )
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Document enregistré",
+        "document": {
+            "id": document_id,
+            "titre": title,
+            "contenu": content,
+            "dossier_id": folder_id,
+        },
+    }), 200
+
+
+@app.delete("/api/documents/<int:document_id>")
+@login_required
+def delete_document(document_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    # L'identifiant de l'utilisateur fait partie de la recherche :
+    # un utilisateur ne peut donc pas supprimer le document d'un autre.
+    cursor.execute(
+        """
+        SELECT Id_document, titre
+        FROM document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+    document = cursor.fetchone()
+
+    if document is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Document introuvable"}), 404
+
+    # Les interactions dépendent du document par une clé étrangère.
+    cursor.execute(
+        "DELETE FROM interaction WHERE Id_document = %s",
+        (document_id,),
+    )
+    cursor.execute(
+        """
+        DELETE FROM document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Document supprimé",
+        "document": {
+            "id": document_id,
+            "titre": document["titre"],
+        },
+    }), 200
+
+
 @app.post("/api/logout")
 def logout():
     session.clear()

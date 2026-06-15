@@ -300,6 +300,206 @@ class AuthenticationTestCase(unittest.TestCase):
         self.assertEqual(delete_parameters, (4, 7))
         connection.commit.assert_called_once()
 
+    @patch("app.get_db_connection")
+    def test_documents_are_limited_to_connected_user(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            {
+                "id": 9,
+                "titre": "Compte rendu",
+                "extrait": "Contenu du document",
+                "derniere_modification": "15/06/2026 à 14:30",
+                "dossier_id": 4,
+                "dossier_nom": "Travail",
+            },
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/documents")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["documents"][0]["titre"],
+            "Compte rendu",
+        )
+        self.assertEqual(cursor.execute.call_args.args[1], (7,))
+
+    @patch("app.get_db_connection")
+    def test_create_document_assigns_connected_user(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.lastrowid = 9
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents",
+            json={
+                "title": "Compte rendu",
+                "content": "",
+                "folderId": None,
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["document"]["id"], 9)
+        self.assertEqual(
+            cursor.execute.call_args.args[1],
+            ("Compte rendu", "", None, 7),
+        )
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_create_document_rejects_another_user_folder(
+        self,
+        mocked_connection,
+    ):
+        mocked_connection.return_value = self.create_fake_connection(None)
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents",
+            json={
+                "title": "Document privé",
+                "content": "",
+                "folderId": 99,
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["message"], "Dossier introuvable")
+
+    @patch("app.get_db_connection")
+    def test_get_document_checks_owner(self, mocked_connection):
+        document = {
+            "id": 9,
+            "titre": "Compte rendu",
+            "contenu": "Texte complet",
+            "dossier_id": 4,
+            "derniere_modification": "15/06/2026 à 14:30",
+        }
+        mocked_connection.return_value = self.create_fake_connection(document)
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/documents/9")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["document"]["contenu"], "Texte complet")
+        self.assertEqual(
+            mocked_connection.return_value.cursor.return_value.execute
+            .call_args.args[1],
+            (9, 7),
+        )
+
+    @patch("app.get_db_connection")
+    def test_update_document_checks_owner(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"Id_document": 9}
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.patch(
+            "/api/documents/9",
+            json={
+                "title": "Nouveau titre",
+                "content": "Nouveau contenu",
+                "folderId": None,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            cursor.execute.call_args_list[1].args[1],
+            ("Nouveau titre", "Nouveau contenu", None, 9, 7),
+        )
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_update_document_rejects_another_user_folder(
+        self,
+        mocked_connection,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [{"Id_document": 9}, None]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.patch(
+            "/api/documents/9",
+            json={
+                "title": "Document privé",
+                "content": "Contenu",
+                "folderId": 99,
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["message"], "Dossier introuvable")
+
+    @patch("app.get_db_connection")
+    def test_delete_document_checks_owner(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "Id_document": 9,
+            "titre": "Document à supprimer",
+        }
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.delete("/api/documents/9")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["message"], "Document supprimé")
+        self.assertEqual(
+            cursor.execute.call_args_list[0].args[1],
+            (9, 7),
+        )
+        self.assertEqual(
+            cursor.execute.call_args_list[2].args[1],
+            (9, 7),
+        )
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_delete_document_rejects_unknown_document(
+        self,
+        mocked_connection,
+    ):
+        mocked_connection.return_value = self.create_fake_connection(None)
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.delete("/api/documents/99")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["message"], "Document introuvable")
+        mocked_connection.return_value.commit.assert_not_called()
+
     def test_logout_clears_session(self):
         with self.client.session_transaction() as session_data:
             session_data["user_id"] = 1

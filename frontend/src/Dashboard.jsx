@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react"
 import "./Dashboard.css"
+import DocumentEditor from "./DocumentEditor"
+import DocumentsView from "./DocumentsView"
 import FoldersView from "./FoldersView"
 
 function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
@@ -7,6 +9,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState("")
   const [activeView, setActiveView] = useState("overview")
+  const [activeDocumentId, setActiveDocumentId] = useState(null)
 
   useEffect(() => {
     async function loadSummary() {
@@ -63,6 +66,43 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
     })
   }
 
+  function handleDocumentCreated() {
+    setSummary((currentSummary) => {
+      if (!currentSummary) {
+        return currentSummary
+      }
+
+      return {
+        ...currentSummary,
+        nombre_documents: currentSummary.nombre_documents + 1,
+      }
+    })
+  }
+
+  function handleDocumentDeleted() {
+    setSummary((currentSummary) => {
+      if (!currentSummary) {
+        return currentSummary
+      }
+
+      return {
+        ...currentSummary,
+        nombre_documents: Math.max(currentSummary.nombre_documents - 1, 0),
+      }
+    })
+    showDocuments()
+  }
+
+  function openDocument(documentId) {
+    setActiveDocumentId(documentId)
+    setActiveView("editor")
+  }
+
+  function showDocuments() {
+    setActiveDocumentId(null)
+    setActiveView("documents")
+  }
+
   return (
     <main className="dashboard-page">
       <aside className="dashboard-sidebar">
@@ -82,10 +122,17 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
             <span aria-hidden="true">⌂</span>
             Vue d’ensemble
           </button>
-          <button type="button" disabled>
+          <button
+            className={
+              activeView === "documents" || activeView === "editor"
+                ? "active"
+                : ""
+            }
+            type="button"
+            onClick={showDocuments}
+          >
             <span aria-hidden="true">▤</span>
             Mes documents
-            <small>Bientôt</small>
           </button>
           <button
             className={activeView === "folders" ? "active" : ""}
@@ -208,10 +255,23 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
           </article>
             </section>
           </>
-        ) : (
+        ) : activeView === "folders" ? (
           <FoldersView
             onFolderCreated={handleFolderCreated}
             onFolderDeleted={handleFolderDeleted}
+            onSessionExpired={onSessionExpired}
+          />
+        ) : activeView === "editor" && activeDocumentId ? (
+          <DocumentEditor
+            documentId={activeDocumentId}
+            onBack={showDocuments}
+            onDeleted={handleDocumentDeleted}
+            onSessionExpired={onSessionExpired}
+          />
+        ) : (
+          <DocumentsView
+            onDocumentCreated={handleDocumentCreated}
+            onOpenDocument={openDocument}
             onSessionExpired={onSessionExpired}
           />
         )}
