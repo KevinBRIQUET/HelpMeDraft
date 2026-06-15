@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 
 const AI_ACTIONS = {
   correct: {
     buttonLabel: "Corriger",
+    historyType: "correction",
     loadingLabel: "Correction...",
     modalTitle: "Correction proposée",
     suggestionLabel: "Suggestion corrigée",
@@ -10,6 +11,7 @@ const AI_ACTIONS = {
   },
   rephrase: {
     buttonLabel: "Reformuler",
+    historyType: "reformuler",
     loadingLabel: "Reformulation...",
     modalTitle: "Reformulation proposée",
     suggestionLabel: "Version professionnelle",
@@ -17,11 +19,26 @@ const AI_ACTIONS = {
   },
   complete: {
     buttonLabel: "Compléter",
+    historyType: "completion",
     loadingLabel: "Rédaction...",
     modalTitle: "Suite proposée",
     suggestionLabel: "Texte complété",
     appliedMessage: "Suite appliquée",
   },
+}
+
+const HISTORY_LABELS = {
+  correction: "Correction",
+  reformuler: "Reformulation",
+  completion: "Complétion",
+}
+
+function createDocumentSnapshot(title, content, folderId) {
+  return JSON.stringify({
+    title: title.trim(),
+    content,
+    folderId: folderId ? Number(folderId) : null,
+  })
 }
 
 function DocumentEditor({
@@ -37,6 +54,9 @@ function DocumentEditor({
   const [folderId, setFolderId] = useState("")
   const [folders, setFolders] = useState([])
   const [lastModified, setLastModified] = useState("")
+  const [savedSnapshot, setSavedSnapshot] = useState(null)
+  const [blockedAutoSaveSnapshot, setBlockedAutoSaveSnapshot] = useState(null)
+  const [saveStatus, setSaveStatus] = useState("saved")
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -44,6 +64,17 @@ function DocumentEditor({
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [aiSuggestion, setAiSuggestion] = useState(null)
   const [aiOriginalText, setAiOriginalText] = useState("")
+  const [versions, setVersions] = useState([])
+  const [interactions, setInteractions] = useState([])
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false)
+  const [historyTab, setHistoryTab] = useState("versions")
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [loadedHistoryTabs, setLoadedHistoryTabs] = useState({
+    versions: false,
+    interactions: false,
+  })
+  const [busyVersionId, setBusyVersionId] = useState(null)
+  const [historyMessage, setHistoryMessage] = useState("")
   const [message, setMessage] = useState("")
   const [isSuccess, setIsSuccess] = useState(false)
 
@@ -52,6 +83,30 @@ function DocumentEditor({
     const trimmedContent = content.trim()
     return trimmedContent ? trimmedContent.split(/\s+/).length : 0
   }, [content])
+
+  const displayedSaveStatus = useMemo(() => {
+    if (isSaving) {
+      return "saving"
+    }
+
+    if (saveStatus === "error") {
+      return "error"
+    }
+
+    if (
+      savedSnapshot !== null &&
+      createDocumentSnapshot(title, content, folderId) !== savedSnapshot
+    ) {
+      return "pending"
+    }
+
+    return "saved"
+  }, [content, folderId, isSaving, saveStatus, savedSnapshot, title])
+
+  function markDocumentChanged() {
+    setSaveStatus("saved")
+    setBlockedAutoSaveSnapshot(null)
+  }
 
   useEffect(() => {
     async function loadEditor() {
@@ -83,6 +138,13 @@ function DocumentEditor({
         setFolderId(document.dossier_id ?? "")
         setLastModified(document.derniere_modification)
         setFolders(foldersData.folders)
+        setSavedSnapshot(
+          createDocumentSnapshot(
+            document.titre,
+            document.contenu,
+            document.dossier_id ?? "",
+          ),
+        )
       } catch {
         setMessage("Impossible de charger ce document.")
         setIsSuccess(false)
@@ -110,11 +172,19 @@ function DocumentEditor({
     return () => document.removeEventListener("keydown", closeModalWithEscape)
   }, [aiSuggestion, isDeleteModalOpen, isDeleting])
 
-  async function handleSave(event) {
-    event.preventDefault()
+  const saveDocument = useCallback(async (showMessage = false, isAutomatic = false) => {
+    if (!title.trim() || isSaving) {
+      return
+    }
+
+    const currentSnapshot = createDocumentSnapshot(title, content, folderId)
     setIsSaving(true)
-    setMessage("")
-    setIsSuccess(false)
+    setSaveStatus("saving")
+
+    if (showMessage) {
+      setMessage("")
+      setIsSuccess(false)
+    }
 
     try {
       const response = await fetch(
@@ -141,18 +211,95 @@ function DocumentEditor({
 
       if (!response.ok) {
         setMessage(data.message)
+        setIsSuccess(false)
+        setSaveStatus("error")
+
+        if (isAutomatic) {
+          setBlockedAutoSaveSnapshot(currentSnapshot)
+        }
         return
       }
 
-      setMessage("Document enregistré")
-      setIsSuccess(true)
+      setSavedSnapshot(currentSnapshot)
+      setBlockedAutoSaveSnapshot(null)
+      setSaveStatus("saved")
       setLastModified("à l'instant")
+
+      if (showMessage) {
+        setMessage(data.message)
+        setIsSuccess(true)
+      }
+
+      if (data.version_created && loadedHistoryTabs.versions) {
+        setVersions((currentVersions) => [
+          data.version,
+          ...currentVersions,
+        ])
+      }
     } catch {
       setMessage("Le serveur est inaccessible.")
+      setIsSuccess(false)
+      setSaveStatus("error")
+
+      if (isAutomatic) {
+        setBlockedAutoSaveSnapshot(currentSnapshot)
+      }
     } finally {
       setIsSaving(false)
     }
+  }, [
+    content,
+    documentId,
+    folderId,
+    isSaving,
+    loadedHistoryTabs.versions,
+    onSessionExpired,
+    title,
+  ])
+
+  function handleSave(event) {
+    event.preventDefault()
+    saveDocument(true)
   }
+
+  // Sauvegarde après une courte période sans nouvelle saisie.
+  useEffect(() => {
+    if (
+      isLoading ||
+      isSaving ||
+      activeAiAction !== null ||
+      savedSnapshot === null ||
+      !title.trim()
+    ) {
+      return undefined
+    }
+
+    const currentSnapshot = createDocumentSnapshot(title, content, folderId)
+
+    if (currentSnapshot === savedSnapshot) {
+      return undefined
+    }
+
+    if (currentSnapshot === blockedAutoSaveSnapshot) {
+      return undefined
+    }
+
+    const timer = window.setTimeout(() => {
+      saveDocument(false, true)
+    }, 2500)
+
+    return () => window.clearTimeout(timer)
+  }, [
+    activeAiAction,
+    blockedAutoSaveSnapshot,
+    content,
+    folderId,
+    isLoading,
+    isSaving,
+    saveDocument,
+    savedSnapshot,
+    title,
+  ])
 
   async function handleDelete() {
     setIsDeleting(true)
@@ -230,6 +377,20 @@ function DocumentEditor({
         action,
         text: data.suggestion,
       })
+
+      if (loadedHistoryTabs.interactions) {
+        setInteractions((currentInteractions) => [
+          {
+            id: `new-${Date.now()}`,
+            type_action: AI_ACTIONS[action].historyType,
+            texte_entree: content,
+            texte_sortie: data.suggestion,
+            date: "À l'instant",
+          },
+          ...currentInteractions,
+        ])
+      }
+
       onQuotaChanged(data.quota_restant)
     } catch {
       setMessage("Le serveur ou l'assistant IA est inaccessible.")
@@ -238,9 +399,123 @@ function DocumentEditor({
     }
   }
 
+  async function loadHistoryTab(tab) {
+    if (loadedHistoryTabs[tab]) {
+      return
+    }
+
+    setIsHistoryLoading(true)
+    setHistoryMessage("")
+
+    try {
+      const endpoint =
+        tab === "versions"
+          ? "versions"
+          : "interactions"
+      const response = await fetch(
+        `http://localhost:5000/api/documents/${documentId}/${endpoint}`,
+        {
+          credentials: "include",
+        },
+      )
+      const data = await response.json()
+
+      if (response.status === 401) {
+        onSessionExpired()
+        return
+      }
+
+      if (!response.ok) {
+        setHistoryMessage(data.message)
+        return
+      }
+
+      if (tab === "versions") {
+        setVersions(data.versions)
+      } else {
+        setInteractions(data.interactions)
+      }
+
+      setLoadedHistoryTabs((currentTabs) => ({
+        ...currentTabs,
+        [tab]: true,
+      }))
+    } catch {
+      setHistoryMessage("Impossible de charger cet historique.")
+    } finally {
+      setIsHistoryLoading(false)
+    }
+  }
+
+  async function toggleHistory() {
+    const shouldOpen = !isHistoryOpen
+    setIsHistoryOpen(shouldOpen)
+
+    if (shouldOpen) {
+      await loadHistoryTab(historyTab)
+    }
+  }
+
+  async function changeHistoryTab(tab) {
+    setHistoryTab(tab)
+    setHistoryMessage("")
+    await loadHistoryTab(tab)
+  }
+
+  async function restoreVersion(versionId) {
+    setBusyVersionId(versionId)
+    setHistoryMessage("")
+    setMessage("")
+
+    try {
+      const response = await fetch(
+        `http://localhost:5000/api/documents/${documentId}/versions/${versionId}/restore`,
+        {
+          method: "POST",
+          credentials: "include",
+        },
+      )
+      const data = await response.json()
+
+      if (response.status === 401) {
+        onSessionExpired()
+        return
+      }
+
+      if (!response.ok) {
+        setHistoryMessage(data.message)
+        return
+      }
+
+      setTitle(data.document.titre)
+      setContent(data.document.contenu)
+      setSavedSnapshot(
+        createDocumentSnapshot(
+          data.document.titre,
+          data.document.contenu,
+          folderId,
+        ),
+      )
+      setBlockedAutoSaveSnapshot(null)
+      setSaveStatus("saved")
+      setLastModified("à l'instant")
+      setVersions((currentVersions) => [
+        data.version,
+        ...currentVersions,
+      ])
+      setMessage("Version restaurée avec succès")
+      setIsSuccess(true)
+    } catch {
+      setHistoryMessage("Impossible de restaurer cette version.")
+    } finally {
+      setBusyVersionId(null)
+    }
+  }
+
   function applyAiSuggestion() {
     const actionConfig = AI_ACTIONS[aiSuggestion.action]
     setContent(aiSuggestion.text)
+    markDocumentChanged()
     setAiSuggestion(null)
     setMessage(
       `${actionConfig.appliedMessage}. Enregistrez le document pour la conserver.`,
@@ -261,6 +536,13 @@ function DocumentEditor({
         </button>
 
         <div className="editor-status">
+          <span className={`autosave-status ${displayedSaveStatus}`}>
+            {displayedSaveStatus === "pending" &&
+              "Modifications non enregistrées"}
+            {displayedSaveStatus === "saving" && "Enregistrement..."}
+            {displayedSaveStatus === "error" && "Échec de l'enregistrement"}
+            {displayedSaveStatus === "saved" && "Sauvegardé"}
+          </span>
           <span>{wordCount} mot{wordCount !== 1 ? "s" : ""}</span>
           {lastModified && <span>Modifié {lastModified}</span>}
         </div>
@@ -275,7 +557,10 @@ function DocumentEditor({
               type="text"
               maxLength="255"
               value={title}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) => {
+                setTitle(event.target.value)
+                markDocumentChanged()
+              }}
               required
             />
           </div>
@@ -285,7 +570,10 @@ function DocumentEditor({
             <select
               id="editorFolder"
               value={folderId}
-              onChange={(event) => setFolderId(event.target.value)}
+              onChange={(event) => {
+                setFolderId(event.target.value)
+                markDocumentChanged()
+              }}
             >
               <option value="">Aucun dossier</option>
               {folders.map((folder) => (
@@ -351,11 +639,127 @@ function DocumentEditor({
           <textarea
             id="editorContent"
             value={content}
-            onChange={(event) => setContent(event.target.value)}
+            onChange={(event) => {
+              setContent(event.target.value)
+              markDocumentChanged()
+            }}
             placeholder="Commencez à rédiger votre document..."
           />
         </div>
       </form>
+
+      <section className="ai-history">
+        <button
+          className="ai-history-toggle"
+          type="button"
+          onClick={toggleHistory}
+          aria-expanded={isHistoryOpen}
+          aria-controls="ai-history-content"
+        >
+          <div>
+            <span>Historique du document</span>
+            <small>Consultez les sauvegardes et les actions de l'assistant IA.</small>
+          </div>
+          <strong aria-hidden="true">{isHistoryOpen ? "−" : "+"}</strong>
+        </button>
+
+        {isHistoryOpen && (
+          <div className="ai-history-content" id="ai-history-content">
+            <div className="history-tabs" role="tablist">
+              <button
+                className={historyTab === "versions" ? "active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={historyTab === "versions"}
+                onClick={() => changeHistoryTab("versions")}
+              >
+                Versions sauvegardées
+              </button>
+              <button
+                className={historyTab === "interactions" ? "active" : ""}
+                type="button"
+                role="tab"
+                aria-selected={historyTab === "interactions"}
+                onClick={() => changeHistoryTab("interactions")}
+              >
+                Activité IA
+              </button>
+            </div>
+
+            {isHistoryLoading ? (
+              <p className="ai-history-state">Chargement de l'historique...</p>
+            ) : historyMessage ? (
+              <p className="ai-history-state error">{historyMessage}</p>
+            ) : historyTab === "versions" && versions.length === 0 ? (
+              <div className="ai-history-empty">
+                <span aria-hidden="true">↺</span>
+                <p>Aucune version sauvegardée pour ce document.</p>
+              </div>
+            ) : historyTab === "versions" ? (
+              <div className="document-version-list">
+                {versions.map((version, index) => (
+                  <article className="document-version-item" key={version.id}>
+                    <header>
+                      <div>
+                        <span>
+                          {index === 0
+                            ? "Dernière sauvegarde"
+                            : `Version ${versions.length - index}`}
+                        </span>
+                        <time>{version.date}</time>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => restoreVersion(version.id)}
+                        disabled={busyVersionId !== null}
+                      >
+                        {busyVersionId === version.id
+                          ? "Restauration..."
+                          : "Restaurer"}
+                      </button>
+                    </header>
+                    <h3>{version.titre}</h3>
+                    <p>
+                      {version.contenu ||
+                        "Cette version ne contient encore aucun texte."}
+                    </p>
+                  </article>
+                ))}
+              </div>
+            ) : interactions.length === 0 ? (
+              <div className="ai-history-empty">
+                <span aria-hidden="true">✦</span>
+                <p>Aucune interaction IA pour ce document.</p>
+              </div>
+            ) : (
+              <div className="ai-history-list">
+                {interactions.map((interaction) => (
+                  <article className="ai-history-item" key={interaction.id}>
+                    <header>
+                      <span>
+                        {HISTORY_LABELS[interaction.type_action] ??
+                          interaction.type_action}
+                      </span>
+                      <time>{interaction.date}</time>
+                    </header>
+
+                    <div className="ai-history-comparison">
+                      <div>
+                        <strong>Texte envoyé</strong>
+                        <p>{interaction.texte_entree}</p>
+                      </div>
+                      <div>
+                        <strong>Réponse de l'IA</strong>
+                        <p>{interaction.texte_sortie}</p>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </section>
 
       {aiSuggestion && (
         <div

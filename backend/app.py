@@ -687,9 +687,18 @@ def create_document():
         """,
         (title, content, folder_id, user_id),
     )
-    connection.commit()
     document_id = cursor.lastrowid
 
+    cursor.execute(
+        """
+        INSERT INTO version_document
+            (titre, contenu, date_version, Id_document, Id_utilisateur)
+        VALUES (%s, %s, NOW(), %s, %s)
+        """,
+        (title, content, document_id, user_id),
+    )
+
+    connection.commit()
     cursor.close()
     connection.close()
 
@@ -759,18 +768,19 @@ def update_document(document_id):
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
-    # Vérifie le propriétaire avant la mise à jour. Cela évite de confondre
-    # un document introuvable avec un enregistrement sans changement.
+    # Charge la version courante pour vérifier le propriétaire et détecter
+    # si l'utilisateur a réellement modifié le document.
     cursor.execute(
         """
-        SELECT Id_document
+        SELECT Id_document, titre, contenu, Id_dossier
         FROM document
         WHERE Id_document = %s AND Id_utilisateur = %s
         """,
         (document_id, user_id),
     )
+    current_document = cursor.fetchone()
 
-    if cursor.fetchone() is None:
+    if current_document is None:
         cursor.close()
         connection.close()
         return jsonify({"message": "Document introuvable"}), 404
@@ -790,24 +800,52 @@ def update_document(document_id):
             connection.close()
             return jsonify({"message": "Dossier introuvable"}), 404
 
-    cursor.execute(
-        """
-        UPDATE document
-        SET titre = %s,
-            contenu = %s,
-            Id_dossier = %s,
-            derniere_modification = NOW()
-        WHERE Id_document = %s AND Id_utilisateur = %s
-        """,
-        (title, content, folder_id, document_id, user_id),
+    has_changed = (
+        current_document["titre"] != title
+        or current_document["contenu"] != content
+        or current_document["Id_dossier"] != folder_id
     )
+    created_version = None
 
-    connection.commit()
+    if has_changed:
+        cursor.execute(
+            """
+            UPDATE document
+            SET titre = %s,
+                contenu = %s,
+                Id_dossier = %s,
+                derniere_modification = NOW()
+            WHERE Id_document = %s AND Id_utilisateur = %s
+            """,
+            (title, content, folder_id, document_id, user_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO version_document
+                (titre, contenu, date_version, Id_document, Id_utilisateur)
+            VALUES (%s, %s, NOW(), %s, %s)
+            """,
+            (title, content, document_id, user_id),
+        )
+        created_version = {
+            "id": cursor.lastrowid,
+            "titre": title,
+            "contenu": content,
+            "date": "À l'instant",
+        }
+        connection.commit()
+
     cursor.close()
     connection.close()
 
     return jsonify({
-        "message": "Document enregistré",
+        "message": (
+            "Document enregistré"
+            if has_changed
+            else "Aucune modification à enregistrer"
+        ),
+        "version_created": has_changed,
+        "version": created_version,
         "document": {
             "id": document_id,
             "titre": title,
@@ -815,6 +853,165 @@ def update_document(document_id):
             "dossier_id": folder_id,
         },
     }), 200
+
+
+@app.get("/api/documents/<int:document_id>/versions")
+@login_required
+def get_document_versions(document_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT Id_document
+        FROM document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+
+    if cursor.fetchone() is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Document introuvable"}), 404
+
+    cursor.execute(
+        """
+        SELECT
+            Id_version AS id,
+            titre,
+            contenu,
+            DATE_FORMAT(date_version, '%d/%m/%Y à %H:%i') AS date
+        FROM version_document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        ORDER BY date_version DESC, Id_version DESC
+        """,
+        (document_id, user_id),
+    )
+    versions = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({"versions": versions}), 200
+
+
+@app.post(
+    "/api/documents/<int:document_id>/versions/<int:version_id>/restore",
+)
+@login_required
+def restore_document_version(document_id, version_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT version.titre, version.contenu
+        FROM version_document version
+        JOIN document doc ON doc.Id_document = version.Id_document
+        WHERE version.Id_version = %s
+          AND version.Id_document = %s
+          AND version.Id_utilisateur = %s
+          AND doc.Id_utilisateur = %s
+        """,
+        (version_id, document_id, user_id, user_id),
+    )
+    version = cursor.fetchone()
+
+    if version is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Version introuvable"}), 404
+
+    cursor.execute(
+        """
+        UPDATE document
+        SET titre = %s,
+            contenu = %s,
+            derniere_modification = NOW()
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (version["titre"], version["contenu"], document_id, user_id),
+    )
+    cursor.execute(
+        """
+        INSERT INTO version_document
+            (titre, contenu, date_version, Id_document, Id_utilisateur)
+        VALUES (%s, %s, NOW(), %s, %s)
+        """,
+        (
+            version["titre"],
+            version["contenu"],
+            document_id,
+            user_id,
+        ),
+    )
+    restored_version_id = cursor.lastrowid
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Version restaurée",
+        "document": {
+            "titre": version["titre"],
+            "contenu": version["contenu"],
+        },
+        "version": {
+            "id": restored_version_id,
+            "titre": version["titre"],
+            "contenu": version["contenu"],
+            "date": "À l'instant",
+        },
+    }), 200
+
+
+@app.get("/api/documents/<int:document_id>/interactions")
+@login_required
+def get_document_interactions(document_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    # Le document doit appartenir à l'utilisateur connecté.
+    cursor.execute(
+        """
+        SELECT Id_document
+        FROM document
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+
+    if cursor.fetchone() is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Document introuvable"}), 404
+
+    cursor.execute(
+        """
+        SELECT
+            Id_interaction AS id,
+            type_action,
+            texte_entree,
+            texte_sortie,
+            DATE_FORMAT(date_, '%d/%m/%Y à %H:%i') AS date
+        FROM interaction
+        WHERE Id_document = %s AND Id_utilisateur = %s
+        ORDER BY date_ DESC, Id_interaction DESC
+        """,
+        (document_id, user_id),
+    )
+    interactions = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({"interactions": interactions}), 200
 
 
 @app.post("/api/documents/<int:document_id>/ai/<action>")

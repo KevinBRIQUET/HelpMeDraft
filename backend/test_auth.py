@@ -414,8 +414,12 @@ class AuthenticationTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()["document"]["id"], 9)
         self.assertEqual(
-            cursor.execute.call_args.args[1],
+            cursor.execute.call_args_list[0].args[1],
             ("Compte rendu", "", None, 7),
+        )
+        self.assertEqual(
+            cursor.execute.call_args_list[1].args[1],
+            ("Compte rendu", "", 9, 7),
         )
         connection.commit.assert_called_once()
 
@@ -468,7 +472,13 @@ class AuthenticationTestCase(unittest.TestCase):
     @patch("app.get_db_connection")
     def test_update_document_checks_owner(self, mocked_connection):
         cursor = MagicMock()
-        cursor.fetchone.return_value = {"Id_document": 9}
+        cursor.lastrowid = 15
+        cursor.fetchone.return_value = {
+            "Id_document": 9,
+            "titre": "Ancien titre",
+            "contenu": "Ancien contenu",
+            "Id_dossier": None,
+        }
         connection = MagicMock()
         connection.cursor.return_value = cursor
         mocked_connection.return_value = connection
@@ -490,7 +500,41 @@ class AuthenticationTestCase(unittest.TestCase):
             cursor.execute.call_args_list[1].args[1],
             ("Nouveau titre", "Nouveau contenu", None, 9, 7),
         )
+        self.assertEqual(
+            cursor.execute.call_args_list[2].args[1],
+            ("Nouveau titre", "Nouveau contenu", 9, 7),
+        )
         connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_update_document_skips_identical_version(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "Id_document": 9,
+            "titre": "Même titre",
+            "contenu": "Même contenu",
+            "Id_dossier": None,
+        }
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.patch(
+            "/api/documents/9",
+            json={
+                "title": "Même titre",
+                "content": "Même contenu",
+                "folderId": None,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["version_created"])
+        self.assertEqual(cursor.execute.call_count, 1)
+        connection.commit.assert_not_called()
 
     @patch("app.get_db_connection")
     def test_update_document_rejects_another_user_folder(
@@ -498,7 +542,15 @@ class AuthenticationTestCase(unittest.TestCase):
         mocked_connection,
     ):
         cursor = MagicMock()
-        cursor.fetchone.side_effect = [{"Id_document": 9}, None]
+        cursor.fetchone.side_effect = [
+            {
+                "Id_document": 9,
+                "titre": "Document privé",
+                "contenu": "Contenu",
+                "Id_dossier": None,
+            },
+            None,
+        ]
         connection = MagicMock()
         connection.cursor.return_value = cursor
         mocked_connection.return_value = connection
@@ -517,6 +569,126 @@ class AuthenticationTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["message"], "Dossier introuvable")
+
+    @patch("app.get_db_connection")
+    def test_document_versions_are_limited_to_owner(
+        self,
+        mocked_connection,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"Id_document": 9}
+        cursor.fetchall.return_value = [
+            {
+                "id": 14,
+                "titre": "Compte rendu",
+                "contenu": "Version enregistrée",
+                "date": "15/06/2026 à 17:00",
+            },
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/documents/9/versions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["versions"][0]["id"], 14)
+        self.assertEqual(
+            cursor.execute.call_args_list[1].args[1],
+            (9, 7),
+        )
+
+    @patch("app.get_db_connection")
+    def test_restore_document_version_creates_new_snapshot(
+        self,
+        mocked_connection,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "titre": "Ancien titre",
+            "contenu": "Ancien contenu",
+        }
+        cursor.lastrowid = 15
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/versions/12/restore",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["document"]["titre"], "Ancien titre")
+        self.assertEqual(
+            cursor.execute.call_args_list[1].args[1],
+            ("Ancien titre", "Ancien contenu", 9, 7),
+        )
+        self.assertEqual(
+            cursor.execute.call_args_list[2].args[1],
+            ("Ancien titre", "Ancien contenu", 9, 7),
+        )
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_document_interactions_are_limited_to_owner(
+        self,
+        mocked_connection,
+    ):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"Id_document": 9}
+        cursor.fetchall.return_value = [
+            {
+                "id": 12,
+                "type_action": "correction",
+                "texte_entree": "Salu sa va",
+                "texte_sortie": "Salut, ça va ?",
+                "date": "15/06/2026 à 16:30",
+            },
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/documents/9/interactions")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.get_json()["interactions"]), 1)
+        self.assertEqual(
+            response.get_json()["interactions"][0]["type_action"],
+            "correction",
+        )
+        self.assertEqual(
+            cursor.execute.call_args_list[0].args[1],
+            (9, 7),
+        )
+        self.assertEqual(
+            cursor.execute.call_args_list[1].args[1],
+            (9, 7),
+        )
+
+    @patch("app.get_db_connection")
+    def test_document_interactions_reject_unknown_document(
+        self,
+        mocked_connection,
+    ):
+        mocked_connection.return_value = self.create_fake_connection(None)
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/documents/99/interactions")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["message"], "Document introuvable")
 
     def test_correct_document_requires_text(self):
         with self.client.session_transaction() as session_data:
