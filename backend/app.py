@@ -254,6 +254,212 @@ def get_current_user():
     }), 200
 
 
+# Résumé de l'espace personnel
+@app.get("/api/dashboard-summary")
+@login_required
+def get_dashboard_summary():
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT
+            u.quota_restant,
+            DATE_FORMAT(u.date_inscription, '%d/%m/%Y') AS date_inscription,
+            (
+                SELECT COUNT(*)
+                FROM dossier d
+                WHERE d.Id_utilisateur = u.Id_utilisateur
+            ) AS nombre_dossiers,
+            (
+                SELECT COUNT(*)
+                FROM document doc
+                WHERE doc.Id_utilisateur = u.Id_utilisateur
+            ) AS nombre_documents
+        FROM utilisateur u
+        WHERE u.Id_utilisateur = %s
+        """,
+        (user_id,),
+    )
+
+    summary = cursor.fetchone()
+
+    cursor.close()
+    connection.close()
+
+    if summary is None:
+        session.clear()
+        return jsonify({"message": "Utilisateur introuvable"}), 401
+
+    return jsonify({"summary": summary}), 200
+
+
+# Gestion des dossiers
+@app.get("/api/folders")
+@login_required
+def get_folders():
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT
+            d.Id_dossier AS id,
+            d.nom,
+            DATE_FORMAT(d.date_creation, '%d/%m/%Y') AS date_creation,
+            COUNT(doc.Id_document) AS nombre_documents
+        FROM dossier d
+        LEFT JOIN document doc ON doc.Id_dossier = d.Id_dossier
+        WHERE d.Id_utilisateur = %s
+        GROUP BY d.Id_dossier, d.nom, d.date_creation
+        ORDER BY d.date_creation DESC, d.Id_dossier DESC
+        """,
+        (user_id,),
+    )
+
+    folders = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({"folders": folders}), 200
+
+
+@app.post("/api/folders")
+@login_required
+def create_folder():
+    user_id = session.get("user_id")
+    data = request.get_json(silent=True) or {}
+    folder_name = data.get("name", "").strip()
+
+    if not folder_name:
+        return jsonify({"message": "Le nom du dossier est obligatoire"}), 400
+
+    if len(folder_name) > 20:
+        return jsonify({
+            "message": "Le nom du dossier ne doit pas dépasser 20 caractères",
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        INSERT INTO dossier (nom, date_creation, Id_utilisateur)
+        VALUES (%s, NOW(), %s)
+        """,
+        (folder_name, user_id),
+    )
+    connection.commit()
+    folder_id = cursor.lastrowid
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Dossier créé avec succès",
+        "folder": {
+            "id": folder_id,
+            "nom": folder_name,
+            "nombre_documents": 0,
+        },
+    }), 201
+
+
+@app.patch("/api/folders/<int:folder_id>")
+@login_required
+def update_folder(folder_id):
+    user_id = session.get("user_id")
+    data = request.get_json(silent=True) or {}
+    folder_name = data.get("name", "").strip()
+
+    if not folder_name:
+        return jsonify({"message": "Le nom du dossier est obligatoire"}), 400
+
+    if len(folder_name) > 20:
+        return jsonify({
+            "message": "Le nom du dossier ne doit pas dépasser 20 caractères",
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        UPDATE dossier
+        SET nom = %s
+        WHERE Id_dossier = %s AND Id_utilisateur = %s
+        """,
+        (folder_name, folder_id, user_id),
+    )
+
+    if cursor.rowcount == 0:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Dossier introuvable"}), 404
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Dossier renommé avec succès",
+        "folder": {
+            "id": folder_id,
+            "nom": folder_name,
+        },
+    }), 200
+
+
+@app.delete("/api/folders/<int:folder_id>")
+@login_required
+def delete_folder(folder_id):
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS nombre_documents
+        FROM document
+        WHERE Id_dossier = %s AND Id_utilisateur = %s
+        """,
+        (folder_id, user_id),
+    )
+    document_count = cursor.fetchone()["nombre_documents"]
+
+    if document_count > 0:
+        cursor.close()
+        connection.close()
+        return jsonify({
+            "message": "Ce dossier contient encore des documents",
+        }), 409
+
+    cursor.execute(
+        """
+        DELETE FROM dossier
+        WHERE Id_dossier = %s AND Id_utilisateur = %s
+        """,
+        (folder_id, user_id),
+    )
+
+    if cursor.rowcount == 0:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Dossier introuvable"}), 404
+
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({"message": "Dossier supprimé avec succès"}), 200
+
+
 @app.post("/api/logout")
 def logout():
     session.clear()

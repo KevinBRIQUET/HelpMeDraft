@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import "./App.css"
+import Dashboard from "./Dashboard"
 
 function App() {
   // Données du formulaire et état de l'interface
@@ -15,6 +16,10 @@ function App() {
   const [isSuccess, setIsSuccess] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [user, setUser] = useState(null)
+
+  const handleSessionExpired = useCallback(() => {
+    setUser(null)
+  }, [])
 
   // Vérifie si une session existe déjà lors du chargement de la page.
   useEffect(() => {
@@ -132,6 +137,17 @@ function App() {
     }
   }
 
+  if (user) {
+    return (
+      <Dashboard
+        user={user}
+        isLoggingOut={isLoading}
+        onLogout={handleLogout}
+        onSessionExpired={handleSessionExpired}
+      />
+    )
+  }
+
   return (
     <main className="login-page">
       <section className="brand-panel" aria-label="Présentation de HelpMeDraft">
@@ -169,33 +185,7 @@ function App() {
         </div>
 
         <div className="login-card">
-          {user ? (
-            <div className="connected-card">
-              <div className="user-avatar" aria-hidden="true">
-                {user.prenom.charAt(0)}
-              </div>
-              <p className="eyebrow">Session active</p>
-              <h2>Bonjour {user.prenom}</h2>
-              <p className="connected-description">
-                Vous êtes connecté à votre espace HelpMeDraft.
-              </p>
-              <div className="user-details">
-                <strong>
-                  {user.prenom} {user.nom}
-                </strong>
-                <span>{user.email}</span>
-              </div>
-              <button
-                className="logout-button"
-                type="button"
-                onClick={handleLogout}
-                disabled={isLoading}
-              >
-                {isLoading ? "Déconnexion..." : "Se déconnecter"}
-              </button>
-            </div>
-          ) : (
-            <>
+          <>
               <div className="auth-tabs" aria-label="Choix du formulaire">
                 <button
                   type="button"
@@ -400,14 +390,7 @@ function App() {
               <p className="privacy-note">
                 Connexion sécurisée · Vos identifiants restent confidentiels
               </p>
-            </>
-          )}
-
-          {user && message && (
-            <p className="form-message error" role="status" aria-live="polite">
-              {message}
-            </p>
-          )}
+          </>
         </div>
       </section>
     </main>

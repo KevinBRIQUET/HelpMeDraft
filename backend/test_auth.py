@@ -167,6 +167,139 @@ class AuthenticationTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.get_json()["message"], "Authentification requise")
 
+    @patch("app.get_db_connection")
+    def test_dashboard_summary_returns_user_statistics(
+        self,
+        mocked_connection,
+    ):
+        summary = {
+            "quota_restant": 20,
+            "date_inscription": "15/06/2026",
+            "nombre_dossiers": 2,
+            "nombre_documents": 5,
+        }
+        mocked_connection.return_value = self.create_fake_connection(summary)
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.get("/api/dashboard-summary")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["summary"], summary)
+
+    @patch("app.get_db_connection")
+    def test_folders_are_limited_to_connected_user(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            {
+                "id": 3,
+                "nom": "Travail",
+                "date_creation": "15/06/2026",
+                "nombre_documents": 2,
+            },
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/folders")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["folders"][0]["nom"], "Travail")
+        self.assertEqual(cursor.execute.call_args.args[1], (7,))
+
+    @patch("app.get_db_connection")
+    def test_create_folder_assigns_connected_user(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.lastrowid = 4
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post("/api/folders", json={"name": "Personnel"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["folder"]["id"], 4)
+        self.assertEqual(cursor.execute.call_args.args[1], ("Personnel", 7))
+        connection.commit.assert_called_once()
+
+    def test_create_folder_rejects_long_name(self):
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/folders",
+            json={"name": "Dossier avec un nom beaucoup trop long"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    @patch("app.get_db_connection")
+    def test_update_folder_checks_owner(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.rowcount = 1
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.patch(
+            "/api/folders/4",
+            json={"name": "Archives"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(cursor.execute.call_args.args[1], ("Archives", 4, 7))
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_delete_folder_rejects_folder_with_documents(
+        self,
+        mocked_connection,
+    ):
+        mocked_connection.return_value = self.create_fake_connection(
+            {"nombre_documents": 2},
+        )
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.delete("/api/folders/4")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["message"],
+            "Ce dossier contient encore des documents",
+        )
+
+    @patch("app.get_db_connection")
+    def test_delete_empty_folder_checks_owner(self, mocked_connection):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {"nombre_documents": 0}
+        cursor.rowcount = 1
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.delete("/api/folders/4")
+
+        self.assertEqual(response.status_code, 200)
+        delete_parameters = cursor.execute.call_args_list[1].args[1]
+        self.assertEqual(delete_parameters, (4, 7))
+        connection.commit.assert_called_once()
+
     def test_logout_clears_session(self):
         with self.client.session_transaction() as session_data:
             session_data["user_id"] = 1
