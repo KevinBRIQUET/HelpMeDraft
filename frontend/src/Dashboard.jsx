@@ -93,6 +93,19 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
     showDocuments()
   }
 
+  function handleQuotaChanged(remainingQuota) {
+    setSummary((currentSummary) => {
+      if (!currentSummary) {
+        return currentSummary
+      }
+
+      return {
+        ...currentSummary,
+        quota_restant: remainingQuota,
+      }
+    })
+  }
+
   function openDocument(documentId) {
     setActiveDocumentId(documentId)
     setActiveView("editor")
@@ -266,6 +279,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
             documentId={activeDocumentId}
             onBack={showDocuments}
             onDeleted={handleDocumentDeleted}
+            onQuotaChanged={handleQuotaChanged}
             onSessionExpired={onSessionExpired}
           />
         ) : (

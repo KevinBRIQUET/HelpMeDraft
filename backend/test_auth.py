@@ -3,7 +3,12 @@ from unittest.mock import MagicMock, patch
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from app import app
+from app import (
+    OllamaUnavailableError,
+    app,
+    call_ollama,
+    clean_ollama_answer,
+)
 
 
 class AuthenticationTestCase(unittest.TestCase):
@@ -35,6 +40,63 @@ class AuthenticationTestCase(unittest.TestCase):
             response.get_json()["message"],
             "Email et mot de passe obligatoires",
         )
+
+    def test_ollama_answer_hides_model_thinking(self):
+        raw_answer = (
+            "<think>Analyse interne qui ne doit pas être affichée.</think>\n\n"
+            "OK"
+        )
+
+        self.assertEqual(clean_ollama_answer(raw_answer), "OK")
+
+    def test_ollama_answer_handles_missing_opening_think_tag(self):
+        raw_answer = (
+            "Analyse interne sans balise ouvrante.\n"
+            "</think>\n\n"
+            "OK"
+        )
+
+        self.assertEqual(clean_ollama_answer(raw_answer), "OK")
+
+    @patch("app.urlopen")
+    def test_ollama_rejects_truncated_response(self, mocked_urlopen):
+        mocked_response = MagicMock()
+        mocked_response.read.return_value = (
+            b'{"done_reason": "length", '
+            b'"message": {"content": "Incomplete answer"}}'
+        )
+        mocked_urlopen.return_value.__enter__.return_value = mocked_response
+
+        with self.assertRaises(OllamaUnavailableError):
+            call_ollama([{"role": "user", "content": "Corrige ce texte"}])
+
+    @patch("app.call_ollama", return_value="OK")
+    def test_ollama_connection_returns_model_response(self, mocked_ollama):
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/test-ollama")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["response"], "OK")
+        mocked_ollama.assert_called_once()
+
+    @patch(
+        "app.call_ollama",
+        side_effect=OllamaUnavailableError,
+    )
+    def test_ollama_connection_handles_unavailable_service(
+        self,
+        mocked_ollama,
+    ):
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/test-ollama")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("Ollama est inaccessible", response.get_json()["message"])
+        mocked_ollama.assert_called_once()
 
     @patch("app.get_db_connection")
     def test_login_rejects_wrong_password(self, mocked_connection):
@@ -455,6 +517,140 @@ class AuthenticationTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.get_json()["message"], "Dossier introuvable")
+
+    def test_correct_document_requires_text(self):
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/ai/correct",
+            json={"text": ""},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.get_json()["message"],
+            "Le texte à traiter est obligatoire",
+        )
+
+    @patch("app.call_ollama")
+    @patch("app.get_db_connection")
+    def test_correct_document_rejects_exhausted_quota(
+        self,
+        mocked_connection,
+        mocked_ollama,
+    ):
+        mocked_connection.return_value = self.create_fake_connection({
+            "Id_document": 9,
+            "quota_restant": 0,
+        })
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/ai/correct",
+            json={"text": "Je suis aller à la réunion."},
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertIn("quota", response.get_json()["message"])
+        mocked_ollama.assert_not_called()
+
+    @patch(
+        "app.call_ollama",
+        return_value="Je suis allé à la réunion.",
+    )
+    @patch("app.get_db_connection")
+    def test_correct_document_saves_interaction_and_decrements_quota(
+        self,
+        mocked_connection,
+        mocked_ollama,
+    ):
+        read_connection = self.create_fake_connection({
+            "Id_document": 9,
+            "quota_restant": 20,
+        })
+
+        write_cursor = MagicMock()
+        write_cursor.rowcount = 1
+        write_connection = MagicMock()
+        write_connection.cursor.return_value = write_cursor
+        mocked_connection.side_effect = [read_connection, write_connection]
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/ai/correct",
+            json={"text": "Je suis aller à la réunion."},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["suggestion"],
+            "Je suis allé à la réunion.",
+        )
+        self.assertEqual(response.get_json()["quota_restant"], 19)
+        self.assertEqual(
+            write_cursor.execute.call_args_list[1].args[1],
+            (
+                "correction",
+                "Je suis aller à la réunion.",
+                "Je suis allé à la réunion.",
+                7,
+                9,
+            ),
+        )
+        write_connection.commit.assert_called_once()
+        mocked_ollama.assert_called_once()
+
+    def test_ai_rejects_unknown_action(self):
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/ai/inconnue",
+            json={"text": "Texte"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["message"], "Action IA inconnue")
+
+    @patch(
+        "app.call_ollama",
+        return_value="Nous vous confirmons la tenue de la réunion.",
+    )
+    @patch("app.get_db_connection")
+    def test_rephrase_document_records_short_database_type(
+        self,
+        mocked_connection,
+        mocked_ollama,
+    ):
+        read_connection = self.create_fake_connection({
+            "Id_document": 9,
+            "quota_restant": 8,
+        })
+        write_cursor = MagicMock()
+        write_cursor.rowcount = 1
+        write_connection = MagicMock()
+        write_connection.cursor.return_value = write_cursor
+        mocked_connection.side_effect = [read_connection, write_connection]
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.post(
+            "/api/documents/9/ai/rephrase",
+            json={"text": "La réunion est bien prévue."},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            write_cursor.execute.call_args_list[1].args[1][0],
+            "reformuler",
+        )
+        mocked_ollama.assert_called_once()
 
     @patch("app.get_db_connection")
     def test_delete_document_checks_owner(self, mocked_connection):

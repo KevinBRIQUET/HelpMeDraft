@@ -1,9 +1,34 @@
 import { useEffect, useMemo, useState } from "react"
 
+const AI_ACTIONS = {
+  correct: {
+    buttonLabel: "Corriger",
+    loadingLabel: "Correction...",
+    modalTitle: "Correction proposée",
+    suggestionLabel: "Suggestion corrigée",
+    appliedMessage: "Correction appliquée",
+  },
+  rephrase: {
+    buttonLabel: "Reformuler",
+    loadingLabel: "Reformulation...",
+    modalTitle: "Reformulation proposée",
+    suggestionLabel: "Version professionnelle",
+    appliedMessage: "Reformulation appliquée",
+  },
+  complete: {
+    buttonLabel: "Compléter",
+    loadingLabel: "Rédaction...",
+    modalTitle: "Suite proposée",
+    suggestionLabel: "Texte complété",
+    appliedMessage: "Suite appliquée",
+  },
+}
+
 function DocumentEditor({
   documentId,
   onBack,
   onDeleted,
+  onQuotaChanged,
   onSessionExpired,
 }) {
   // Contenu du document et informations nécessaires à l'éditeur.
@@ -15,7 +40,10 @@ function DocumentEditor({
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+  const [activeAiAction, setActiveAiAction] = useState(null)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
+  const [aiSuggestion, setAiSuggestion] = useState(null)
+  const [aiOriginalText, setAiOriginalText] = useState("")
   const [message, setMessage] = useState("")
   const [isSuccess, setIsSuccess] = useState(false)
 
@@ -66,17 +94,21 @@ function DocumentEditor({
     loadEditor()
   }, [documentId, onSessionExpired])
 
-  // La fenêtre peut être fermée avec Échap, sauf pendant la suppression.
+  // Les fenêtres peuvent être fermées avec Échap quand aucune action ne tourne.
   useEffect(() => {
     function closeModalWithEscape(event) {
       if (event.key === "Escape" && isDeleteModalOpen && !isDeleting) {
         setIsDeleteModalOpen(false)
       }
+
+      if (event.key === "Escape" && aiSuggestion) {
+        setAiSuggestion(null)
+      }
     }
 
     document.addEventListener("keydown", closeModalWithEscape)
     return () => document.removeEventListener("keydown", closeModalWithEscape)
-  }, [isDeleteModalOpen, isDeleting])
+  }, [aiSuggestion, isDeleteModalOpen, isDeleting])
 
   async function handleSave(event) {
     event.preventDefault()
@@ -158,6 +190,64 @@ function DocumentEditor({
     }
   }
 
+  async function handleAiAction(action) {
+    if (!content.trim()) {
+      setMessage("Écrivez du texte avant d'utiliser l'assistant IA.")
+      setIsSuccess(false)
+      return
+    }
+
+    setActiveAiAction(action)
+    setMessage("")
+    setIsSuccess(false)
+    setAiOriginalText(content)
+
+    try {
+      const response = await fetch(
+        `http://localhost:5000/api/documents/${documentId}/ai/${action}`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ text: content }),
+        },
+      )
+      const data = await response.json()
+
+      if (response.status === 401) {
+        onSessionExpired()
+        return
+      }
+
+      if (!response.ok) {
+        setMessage(data.message)
+        return
+      }
+
+      setAiSuggestion({
+        action,
+        text: data.suggestion,
+      })
+      onQuotaChanged(data.quota_restant)
+    } catch {
+      setMessage("Le serveur ou l'assistant IA est inaccessible.")
+    } finally {
+      setActiveAiAction(null)
+    }
+  }
+
+  function applyAiSuggestion() {
+    const actionConfig = AI_ACTIONS[aiSuggestion.action]
+    setContent(aiSuggestion.text)
+    setAiSuggestion(null)
+    setMessage(
+      `${actionConfig.appliedMessage}. Enregistrez le document pour la conserver.`,
+    )
+    setIsSuccess(true)
+  }
+
   if (isLoading) {
     return <p className="editor-loading">Chargement de l'éditeur...</p>
   }
@@ -211,13 +301,39 @@ function DocumentEditor({
               className="editor-delete"
               type="button"
               onClick={() => setIsDeleteModalOpen(true)}
-              disabled={isSaving}
+              disabled={isSaving || activeAiAction !== null}
             >
               Supprimer
             </button>
-            <button className="editor-save" type="submit" disabled={isSaving}>
+            <button
+              className="editor-save"
+              type="submit"
+              disabled={isSaving || activeAiAction !== null}
+            >
               {isSaving ? "Enregistrement..." : "Enregistrer"}
             </button>
+          </div>
+        </div>
+
+        <div className="editor-ai-tools">
+          <div>
+            <p>Assistant IA</p>
+            <span>Améliorez votre texte avec le modèle local Ollama.</span>
+          </div>
+          <div className="editor-ai-buttons">
+            {Object.entries(AI_ACTIONS).map(([action, actionConfig]) => (
+              <button
+                className="editor-ai"
+                type="button"
+                key={action}
+                onClick={() => handleAiAction(action)}
+                disabled={isSaving || activeAiAction !== null}
+              >
+                {activeAiAction === action
+                  ? actionConfig.loadingLabel
+                  : actionConfig.buttonLabel}
+              </button>
+            ))}
           </div>
         </div>
 
@@ -240,6 +356,70 @@ function DocumentEditor({
           />
         </div>
       </form>
+
+      {aiSuggestion && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setAiSuggestion(null)
+            }
+          }}
+        >
+          <section
+            className="ai-suggestion-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-suggestion-title"
+            aria-describedby="ai-suggestion-description"
+          >
+            <div className="ai-suggestion-heading">
+              <div>
+                <p className="eyebrow">Assistant de rédaction</p>
+                <h2 id="ai-suggestion-title">
+                  {AI_ACTIONS[aiSuggestion.action].modalTitle}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAiSuggestion(null)}
+                aria-label="Fermer la suggestion"
+              >
+                ×
+              </button>
+            </div>
+
+            <p id="ai-suggestion-description">
+              Comparez les deux versions avant de remplacer le texte actuel.
+            </p>
+
+            <div className="ai-comparison">
+              <article>
+                <span>Texte actuel</span>
+                <p>{aiOriginalText}</p>
+              </article>
+              <article className="ai-corrected-text">
+                <span>{AI_ACTIONS[aiSuggestion.action].suggestionLabel}</span>
+                <p>{aiSuggestion.text}</p>
+              </article>
+            </div>
+
+            <div className="ai-suggestion-actions">
+              <button type="button" onClick={() => setAiSuggestion(null)}>
+                Conserver mon texte
+              </button>
+              <button
+                className="apply"
+                type="button"
+                onClick={applyAiSuggestion}
+                autoFocus
+              >
+                Appliquer la suggestion
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
 
       {isDeleteModalOpen && (
         <div

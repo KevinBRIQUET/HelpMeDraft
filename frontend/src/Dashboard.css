@@ -930,7 +930,8 @@
 }
 
 .editor-save,
-.editor-delete {
+.editor-delete,
+.editor-ai {
   min-height: 44px;
   border-radius: 9px;
   padding: 0 20px;
@@ -962,10 +963,56 @@
   background: #ffebe9;
 }
 
+.editor-ai {
+  border: 1px solid #a9d9d2;
+  color: #0b665f;
+  background: #e9f8f5;
+}
+
+.editor-ai:hover:not(:disabled) {
+  border-color: #58b4aa;
+  background: #d9f3ee;
+}
+
 .editor-save:disabled,
-.editor-delete:disabled {
+.editor-delete:disabled,
+.editor-ai:disabled {
   cursor: wait;
   opacity: 0.65;
+}
+
+.editor-ai-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  border-bottom: 1px solid #d9e9e6;
+  padding: 14px 20px;
+  background: #f0f9f7;
+}
+
+.editor-ai-tools p {
+  margin: 0;
+  color: #0d665f;
+  font-size: 0.75rem;
+  font-weight: 820;
+}
+
+.editor-ai-tools span {
+  display: block;
+  margin-top: 3px;
+  color: #6d817f;
+  font-size: 0.67rem;
+}
+
+.editor-ai-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.editor-ai-buttons .editor-ai {
+  min-width: 100px;
 }
 
 .editor-message {
@@ -1016,6 +1063,134 @@
 
 .editor-paper textarea::placeholder {
   color: #a2adb5;
+}
+
+/* Comparaison entre le texte actuel et la suggestion de l'IA */
+.ai-suggestion-modal {
+  width: min(100%, 980px);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+  border: 1px solid #cce2df;
+  border-radius: 20px;
+  padding: 30px;
+  background: #ffffff;
+  box-shadow: 0 28px 80px rgba(5, 22, 38, 0.3);
+  animation: modal-slide-in 180ms ease-out;
+}
+
+.ai-suggestion-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ai-suggestion-heading .eyebrow {
+  color: #168a80;
+}
+
+.ai-suggestion-heading h2 {
+  margin: 0;
+  color: #172d3f;
+  font-size: 1.65rem;
+  letter-spacing: -0.035em;
+}
+
+.ai-suggestion-heading > button {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #d4dee4;
+  border-radius: 10px;
+  color: #617685;
+  background: #f7f9fa;
+  font: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.ai-suggestion-modal > p {
+  margin: 12px 0 0;
+  color: #687887;
+  font-size: 0.82rem;
+}
+
+.ai-comparison {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.ai-comparison article {
+  min-width: 0;
+  border: 1px solid #dce4e9;
+  border-radius: 14px;
+  padding: 18px;
+  background: #f8fafb;
+}
+
+.ai-comparison article.ai-corrected-text {
+  border-color: #a9d9d2;
+  background: #effaf8;
+}
+
+.ai-comparison article > span {
+  display: block;
+  margin-bottom: 12px;
+  color: #687d8c;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ai-comparison .ai-corrected-text > span {
+  color: #0f746b;
+}
+
+.ai-comparison article > p {
+  max-height: 330px;
+  overflow-y: auto;
+  margin: 0;
+  color: #30495b;
+  font-size: 0.84rem;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-suggestion-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
+.ai-suggestion-actions button {
+  min-height: 46px;
+  border: 1px solid #c9d4dd;
+  border-radius: 10px;
+  padding: 0 18px;
+  color: #455e70;
+  background: #ffffff;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.ai-suggestion-actions button.apply {
+  border-color: #168a80;
+  color: #ffffff;
+  background: linear-gradient(135deg, #0d6c65, #168a80);
+  box-shadow: 0 9px 20px rgba(15, 123, 114, 0.18);
+}
+
+.ai-suggestion-actions button:hover {
+  filter: brightness(1.04);
 }
 
 .folder-card {
@@ -1358,6 +1533,15 @@
     grid-column: 1 / -1;
     justify-content: flex-end;
   }
+
+  .editor-ai-tools {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .ai-comparison {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1456,7 +1640,17 @@
   .editor-actions {
     grid-column: auto;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
+  }
+
+  .editor-ai-buttons {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 1fr;
+  }
+
+  .editor-ai-buttons .editor-ai {
+    width: 100%;
   }
 
   .editor-paper {
@@ -1465,6 +1659,15 @@
 
   .editor-paper textarea {
     min-height: 440px;
+  }
+
+  .ai-suggestion-modal {
+    padding: 24px 20px;
+  }
+
+  .ai-suggestion-actions {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }
 

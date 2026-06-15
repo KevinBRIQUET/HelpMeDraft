@@ -1,7 +1,10 @@
+import json
 import os
 import re
 from datetime import timedelta
 from functools import wraps
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import mysql.connector
 from dotenv import load_dotenv
@@ -40,6 +43,121 @@ def get_db_connection():
     )
 
 
+# Communication avec le modèle local Ollama
+class OllamaUnavailableError(Exception):
+    """Indique que le service Ollama ne peut pas fournir de réponse."""
+
+
+def clean_ollama_answer(answer):
+    # Certaines versions de modèles renvoient encore leur réflexion dans
+    # le contenu. HelpMeDraft ne conserve que la réponse destinée à l'utilisateur.
+    cleaned_answer = re.sub(
+        r"<think>.*?</think>",
+        "",
+        answer,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+    # Qwen peut parfois omettre la balise ouvrante mais conserver </think>.
+    if re.search(r"</think>", cleaned_answer, flags=re.IGNORECASE):
+        cleaned_answer = re.split(
+            r"</think>",
+            cleaned_answer,
+            flags=re.IGNORECASE,
+        )[-1]
+
+    return cleaned_answer.strip()
+
+
+def call_ollama(messages):
+    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    model = os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct")
+    input_length = sum(
+        len(message.get("content", ""))
+        for message in messages
+    )
+    max_generated_tokens = min(4096, max(128, input_length // 3 + 64))
+
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+            "think": False,
+            "keep_alive": "10m",
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": 8192,
+                "num_predict": max_generated_tokens,
+            },
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    ollama_request = Request(
+        f"{ollama_url}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+        with urlopen(ollama_request, timeout=timeout) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except (URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise OllamaUnavailableError from error
+
+    # Une réponse arrêtée par la limite est incomplète et ne doit jamais être
+    # proposée à l'utilisateur comme une correction valide.
+    if response_data.get("done_reason") == "length":
+        raise OllamaUnavailableError
+
+    answer = clean_ollama_answer(
+        response_data.get("message", {}).get("content", ""),
+    )
+
+    if not answer:
+        raise OllamaUnavailableError
+
+    return answer
+
+
+# Actions IA autorisées et prompts associés
+AI_ACTIONS = {
+    "correct": {
+        "database_type": "correction",
+        "success_message": "Correction générée",
+        "prompt": (
+            "Tu es le correcteur de HelpMeDraft. Corrige uniquement "
+            "l'orthographe, la grammaire, la conjugaison et la ponctuation "
+            "du texte. Conserve son sens et son ton. Retourne uniquement "
+            "le texte corrigé, sans explication."
+        ),
+    },
+    "rephrase": {
+        "database_type": "reformuler",
+        "success_message": "Reformulation générée",
+        "prompt": (
+            "Tu es l'assistant de rédaction de HelpMeDraft. Reformule le "
+            "texte dans un style professionnel, clair et naturel. Conserve "
+            "toutes les informations et le sens d'origine. Retourne "
+            "uniquement le texte reformulé, sans explication."
+        ),
+    },
+    "complete": {
+        "database_type": "completion",
+        "success_message": "Suite générée",
+        "prompt": (
+            "Tu es l'assistant de rédaction de HelpMeDraft. Continue le "
+            "texte de façon cohérente et professionnelle avec un court "
+            "paragraphe. Retourne le texte original inchangé suivi de ta "
+            "continuation, sans titre ni explication."
+        ),
+    },
+}
+
+
 # Protection des routes réservées aux utilisateurs connectés
 def login_required(route):
     @wraps(route)
@@ -73,6 +191,35 @@ def test_db():
         "message": "Connexion MySQL réussie",
         "database": database_name
     }
+
+
+@app.get("/api/test-ollama")
+@login_required
+def test_ollama():
+    try:
+        answer = call_ollama([
+            {
+                "role": "system",
+                "content": (
+                    "Tu testes la connexion technique de HelpMeDraft. "
+                    "Réponds uniquement par OK."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Le service fonctionne-t-il ?",
+            },
+        ])
+    except OllamaUnavailableError:
+        return jsonify({
+            "message": "Ollama est inaccessible ou le modèle est indisponible",
+        }), 503
+
+    return jsonify({
+        "message": "Connexion Ollama réussie",
+        "model": os.getenv("OLLAMA_MODEL", "qwen3:4b-instruct"),
+        "response": answer,
+    }), 200
 
 
 # Authentification
@@ -667,6 +814,107 @@ def update_document(document_id):
             "contenu": content,
             "dossier_id": folder_id,
         },
+    }), 200
+
+
+@app.post("/api/documents/<int:document_id>/ai/<action>")
+@login_required
+def generate_ai_suggestion(document_id, action):
+    user_id = session.get("user_id")
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    action_config = AI_ACTIONS.get(action)
+
+    if action_config is None:
+        return jsonify({"message": "Action IA inconnue"}), 404
+
+    if not isinstance(text, str) or not text.strip():
+        return jsonify({"message": "Le texte à traiter est obligatoire"}), 400
+
+    if len(text) > 12000:
+        return jsonify({
+            "message": "Le texte ne doit pas dépasser 12 000 caractères",
+        }), 400
+
+    # Vérifie le propriétaire du document et le quota avant d'appeler l'IA.
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT doc.Id_document, u.quota_restant
+        FROM document doc
+        JOIN utilisateur u ON u.Id_utilisateur = doc.Id_utilisateur
+        WHERE doc.Id_document = %s AND doc.Id_utilisateur = %s
+        """,
+        (document_id, user_id),
+    )
+    document_access = cursor.fetchone()
+    cursor.close()
+    connection.close()
+
+    if document_access is None:
+        return jsonify({"message": "Document introuvable"}), 404
+
+    if (document_access["quota_restant"] or 0) <= 0:
+        return jsonify({"message": "Votre quota de requêtes IA est épuisé"}), 429
+
+    try:
+        suggestion = call_ollama([
+            {
+                "role": "system",
+                "content": action_config["prompt"],
+            },
+            {
+                "role": "user",
+                "content": text,
+            },
+        ])
+    except OllamaUnavailableError:
+        return jsonify({
+            "message": "L'assistant IA est temporairement indisponible",
+        }), 503
+
+    # Le quota et l'historique sont modifiés ensemble après une réponse réussie.
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        UPDATE utilisateur
+        SET quota_restant = quota_restant - 1
+        WHERE Id_utilisateur = %s AND quota_restant > 0
+        """,
+        (user_id,),
+    )
+
+    if cursor.rowcount == 0:
+        connection.rollback()
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Votre quota de requêtes IA est épuisé"}), 429
+
+    cursor.execute(
+        """
+        INSERT INTO interaction
+            (type_action, texte_entree, texte_sortie, date_,
+             Id_utilisateur, Id_document)
+        VALUES (%s, %s, %s, NOW(), %s, %s)
+        """,
+        (
+            action_config["database_type"],
+            text,
+            suggestion,
+            user_id,
+            document_id,
+        ),
+    )
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": action_config["success_message"],
+        "suggestion": suggestion,
+        "quota_restant": document_access["quota_restant"] - 1,
     }), 200
 
 
