@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react"
 
 function DocumentsView({
+  filterFolderId,
   onDocumentCreated,
+  onFilterFolderChange,
   onOpenDocument,
   onSessionExpired,
 }) {
@@ -27,8 +29,8 @@ function DocumentsView({
         ])
 
         if (
-          documentsResponse.status === 401 ||
-          foldersResponse.status === 401
+          [401, 403].includes(documentsResponse.status) ||
+          [401, 403].includes(foldersResponse.status)
         ) {
           onSessionExpired()
           return
@@ -75,7 +77,7 @@ function DocumentsView({
       })
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -107,6 +109,12 @@ function DocumentsView({
       setIsCreating(false)
     }
   }
+
+  const displayedDocuments = filterFolderId
+    ? documents.filter(
+        (document) => document.dossier_id === Number(filterFolderId),
+      )
+    : documents
 
   return (
     <div className="documents-view">
@@ -179,22 +187,69 @@ function DocumentsView({
 
       <section className="documents-list-section">
         <div className="documents-list-heading">
-          <h2>Vos documents</h2>
-          {!isLoading && <span>{documents.length} au total</span>}
+          <div>
+            <h2>Vos documents</h2>
+            {!isLoading && (
+              <span>
+                {displayedDocuments.length} affiché
+                {displayedDocuments.length !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+
+          <label className="documents-filter">
+            <span>Filtrer par dossier</span>
+            <select
+              value={filterFolderId ?? ""}
+              onChange={(event) =>
+                onFilterFolderChange(
+                  event.target.value ? Number(event.target.value) : null,
+                )
+              }
+            >
+              <option value="">Tous les dossiers</option>
+              {folders.map((folder) => (
+                <option value={folder.id} key={folder.id}>
+                  {folder.nom}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         {isLoading ? (
           <p className="documents-loading">Chargement des documents...</p>
-        ) : documents.length === 0 ? (
+        ) : displayedDocuments.length === 0 ? (
           <div className="empty-documents">
             <span aria-hidden="true">▤</span>
-            <h3>Aucun document pour le moment</h3>
-            <p>Créez votre premier brouillon avec le formulaire ci-dessus.</p>
+            <h3>
+              {filterFolderId
+                ? "Aucun document dans ce dossier"
+                : "Aucun document pour le moment"}
+            </h3>
+            <p>
+              {filterFolderId
+                ? "Choisissez un autre dossier ou créez un nouveau document."
+                : "Créez votre premier brouillon avec le formulaire ci-dessus."}
+            </p>
           </div>
         ) : (
           <div className="documents-grid">
-            {documents.map((document) => (
-              <article className="document-card" key={document.id}>
+            {displayedDocuments.map((document) => (
+              <article
+                className="document-card"
+                key={document.id}
+                role="button"
+                tabIndex="0"
+                aria-label={`Ouvrir le document ${document.titre}`}
+                onClick={() => onOpenDocument(document.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault()
+                    onOpenDocument(document.id)
+                  }
+                }}
+              >
                 <div className="document-card-top">
                   <span className="document-card-icon" aria-hidden="true">
                     ▤
@@ -214,12 +269,7 @@ function DocumentsView({
 
                 <footer>
                   <span>Modifié {document.derniere_modification}</span>
-                  <button
-                    type="button"
-                    onClick={() => onOpenDocument(document.id)}
-                  >
-                    Ouvrir
-                  </button>
+                  <strong>Ouvrir →</strong>
                 </footer>
               </article>
             ))}

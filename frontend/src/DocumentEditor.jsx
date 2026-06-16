@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 const AI_ACTIONS = {
   correct: {
@@ -41,10 +41,121 @@ function createDocumentSnapshot(title, content, folderId) {
   })
 }
 
+function appendInlineMarkdown(parent, text) {
+  const tokens = text.split(
+    /(\*\*\*.+?\*\*\*|\*\*.+?\*\*|\+\+.+?\+\+|\*.+?\*)/g,
+  )
+
+  tokens.forEach((token) => {
+    if (!token) {
+      return
+    }
+
+    let node = document.createTextNode(token)
+
+    if (token.startsWith("***") && token.endsWith("***")) {
+      node = document.createElement("strong")
+      const emphasis = document.createElement("em")
+      appendInlineMarkdown(emphasis, token.slice(3, -3))
+      node.append(emphasis)
+    } else if (token.startsWith("**") && token.endsWith("**")) {
+      node = document.createElement("strong")
+      appendInlineMarkdown(node, token.slice(2, -2))
+    } else if (token.startsWith("++") && token.endsWith("++")) {
+      node = document.createElement("u")
+      appendInlineMarkdown(node, token.slice(2, -2))
+    } else if (token.startsWith("*") && token.endsWith("*")) {
+      node = document.createElement("em")
+      appendInlineMarkdown(node, token.slice(1, -1))
+    }
+
+    parent.append(node)
+  })
+}
+
+function renderMarkdownInEditor(editor, content) {
+  if (!content) {
+    editor.replaceChildren()
+    return
+  }
+
+  const fragment = document.createDocumentFragment()
+
+  content.split("\n").forEach((line) => {
+    let tagName = "p"
+    let lineContent = line
+
+    if (line.startsWith("### ")) {
+      tagName = "h3"
+      lineContent = line.slice(4)
+    } else if (line.startsWith("## ")) {
+      tagName = "h2"
+      lineContent = line.slice(3)
+    } else if (line.startsWith("# ")) {
+      tagName = "h1"
+      lineContent = line.slice(2)
+    }
+
+    const block = document.createElement(tagName)
+
+    if (lineContent) {
+      appendInlineMarkdown(block, lineContent)
+    } else {
+      block.append(document.createElement("br"))
+    }
+
+    fragment.append(block)
+  })
+
+  editor.replaceChildren(fragment)
+}
+
+function serializeEditorNode(node) {
+  if (node.nodeType === 3) {
+    return node.textContent.replaceAll("\u00a0", " ")
+  }
+
+  const children = Array.from(node.childNodes)
+    .map(serializeEditorNode)
+    .join("")
+
+  switch (node.nodeName) {
+    case "B":
+    case "STRONG":
+      return `**${children}**`
+    case "I":
+    case "EM":
+      return `*${children}*`
+    case "U":
+      return `++${children}++`
+    case "H1":
+      return `# ${children}\n`
+    case "H2":
+      return `## ${children}\n`
+    case "H3":
+      return `### ${children}\n`
+    case "P":
+    case "DIV":
+      return `${children}\n`
+    case "BR":
+      return "\n"
+    default:
+      return children
+  }
+}
+
+function readMarkdownFromEditor(editor) {
+  return Array.from(editor.childNodes)
+    .map(serializeEditorNode)
+    .join("")
+    .replace(/\n+$/, "")
+}
+
 function DocumentEditor({
   documentId,
   onBack,
   onDeleted,
+  onDocumentUpdated,
   onQuotaChanged,
   onSessionExpired,
 }) {
@@ -77,6 +188,9 @@ function DocumentEditor({
   const [historyMessage, setHistoryMessage] = useState("")
   const [message, setMessage] = useState("")
   const [isSuccess, setIsSuccess] = useState(false)
+  const richEditorRef = useRef(null)
+  const pendingEditorContentRef = useRef("")
+  const [editorContentVersion, setEditorContentVersion] = useState(0)
 
   // Le compteur est recalculé uniquement quand le contenu change.
   const wordCount = useMemo(() => {
@@ -108,6 +222,86 @@ function DocumentEditor({
     setBlockedAutoSaveSnapshot(null)
   }
 
+  const replaceEditorContent = useCallback((nextContent) => {
+    pendingEditorContentRef.current = nextContent
+    setContent(nextContent)
+    setEditorContentVersion((currentVersion) => currentVersion + 1)
+  }, [])
+
+  function updateContentFromEditor() {
+    const editor = richEditorRef.current
+
+    if (!editor) {
+      return
+    }
+
+    setContent(readMarkdownFromEditor(editor))
+    markDocumentChanged()
+  }
+
+  function applyEditorCommand(command, value = null) {
+    const editor = richEditorRef.current
+
+    if (!editor) {
+      return
+    }
+
+    editor.focus()
+    document.execCommand("styleWithCSS", false, false)
+    document.execCommand(command, false, value)
+    updateContentFromEditor()
+  }
+
+  function applyHeading() {
+    const currentBlock = String(
+      document.queryCommandValue("formatBlock"),
+    ).replace(/[<>]/g, "").toLowerCase()
+
+    applyEditorCommand("formatBlock", currentBlock === "h1" ? "p" : "h1")
+  }
+
+  function handleEditorShortcut(event) {
+    if (!event.ctrlKey && !event.metaKey) {
+      return
+    }
+
+    const shortcut = event.key.toLowerCase()
+
+    if (shortcut === "b") {
+      event.preventDefault()
+      applyEditorCommand("bold")
+    }
+
+    if (shortcut === "i") {
+      event.preventDefault()
+      applyEditorCommand("italic")
+    }
+
+    if (shortcut === "u") {
+      event.preventDefault()
+      applyEditorCommand("underline")
+    }
+  }
+
+  function handleEditorPaste(event) {
+    event.preventDefault()
+    document.execCommand(
+      "insertText",
+      false,
+      event.clipboardData.getData("text/plain"),
+    )
+    updateContentFromEditor()
+  }
+
+  useEffect(() => {
+    if (!isLoading && richEditorRef.current) {
+      renderMarkdownInEditor(
+        richEditorRef.current,
+        pendingEditorContentRef.current,
+      )
+    }
+  }, [documentId, editorContentVersion, isLoading])
+
   useEffect(() => {
     async function loadEditor() {
       try {
@@ -120,7 +314,10 @@ function DocumentEditor({
           }),
         ])
 
-        if (documentResponse.status === 401 || foldersResponse.status === 401) {
+        if (
+          [401, 403].includes(documentResponse.status) ||
+          [401, 403].includes(foldersResponse.status)
+        ) {
           onSessionExpired()
           return
         }
@@ -134,7 +331,7 @@ function DocumentEditor({
         const document = documentData.document
 
         setTitle(document.titre)
-        setContent(document.contenu)
+        replaceEditorContent(document.contenu)
         setFolderId(document.dossier_id ?? "")
         setLastModified(document.derniere_modification)
         setFolders(foldersData.folders)
@@ -154,7 +351,7 @@ function DocumentEditor({
     }
 
     loadEditor()
-  }, [documentId, onSessionExpired])
+  }, [documentId, onSessionExpired, replaceEditorContent])
 
   // Les fenêtres peuvent être fermées avec Échap quand aucune action ne tourne.
   useEffect(() => {
@@ -204,7 +401,7 @@ function DocumentEditor({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -236,6 +433,10 @@ function DocumentEditor({
           ...currentVersions,
         ])
       }
+
+      if (data.version_created) {
+        onDocumentUpdated()
+      }
     } catch {
       setMessage("Le serveur est inaccessible.")
       setIsSuccess(false)
@@ -253,6 +454,7 @@ function DocumentEditor({
     folderId,
     isSaving,
     loadedHistoryTabs.versions,
+    onDocumentUpdated,
     onSessionExpired,
     title,
   ])
@@ -316,7 +518,7 @@ function DocumentEditor({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -363,7 +565,7 @@ function DocumentEditor({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -420,7 +622,7 @@ function DocumentEditor({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -477,7 +679,7 @@ function DocumentEditor({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -488,7 +690,7 @@ function DocumentEditor({
       }
 
       setTitle(data.document.titre)
-      setContent(data.document.contenu)
+      replaceEditorContent(data.document.contenu)
       setSavedSnapshot(
         createDocumentSnapshot(
           data.document.titre,
@@ -503,6 +705,7 @@ function DocumentEditor({
         data.version,
         ...currentVersions,
       ])
+      onDocumentUpdated()
       setMessage("Version restaurée avec succès")
       setIsSuccess(true)
     } catch {
@@ -514,7 +717,7 @@ function DocumentEditor({
 
   function applyAiSuggestion() {
     const actionConfig = AI_ACTIONS[aiSuggestion.action]
-    setContent(aiSuggestion.text)
+    replaceEditorContent(aiSuggestion.text)
     markDocumentChanged()
     setAiSuggestion(null)
     setMessage(
@@ -604,24 +807,62 @@ function DocumentEditor({
         </div>
 
         <div className="editor-ai-tools">
-          <div>
-            <p>Assistant IA</p>
-            <span>Améliorez votre texte avec le modèle local Ollama.</span>
+          <div className="format-buttons" aria-label="Mise en forme du texte">
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyEditorCommand("bold")}
+              aria-label="Mettre en gras"
+              title="Gras (Ctrl+B)"
+            >
+              <strong>G</strong>
+            </button>
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyEditorCommand("italic")}
+              aria-label="Mettre en italique"
+              title="Italique (Ctrl+I)"
+            >
+              <em>I</em>
+            </button>
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => applyEditorCommand("underline")}
+              aria-label="Souligner"
+              title="Souligné (Ctrl+U)"
+            >
+              <u>S</u>
+            </button>
+            <button
+              type="button"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={applyHeading}
+              aria-label="Transformer en titre"
+              title="Titre principal"
+            >
+              Titre
+            </button>
           </div>
-          <div className="editor-ai-buttons">
-            {Object.entries(AI_ACTIONS).map(([action, actionConfig]) => (
-              <button
-                className="editor-ai"
-                type="button"
-                key={action}
-                onClick={() => handleAiAction(action)}
-                disabled={isSaving || activeAiAction !== null}
-              >
-                {activeAiAction === action
-                  ? actionConfig.loadingLabel
-                  : actionConfig.buttonLabel}
-              </button>
-            ))}
+
+          <div className="editor-ai-group">
+            <span className="editor-ai-label">Assistant IA</span>
+            <div className="editor-ai-buttons">
+              {Object.entries(AI_ACTIONS).map(([action, actionConfig]) => (
+                <button
+                  className="editor-ai"
+                  type="button"
+                  key={action}
+                  onClick={() => handleAiAction(action)}
+                  disabled={isSaving || activeAiAction !== null}
+                >
+                  {activeAiAction === action
+                    ? actionConfig.loadingLabel
+                    : actionConfig.buttonLabel}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -635,15 +876,20 @@ function DocumentEditor({
         )}
 
         <div className="editor-paper">
-          <label htmlFor="editorContent">Contenu du document</label>
-          <textarea
+          <span className="editor-content-label">Contenu du document</span>
+          <div
+            className="rich-text-editor"
             id="editorContent"
-            value={content}
-            onChange={(event) => {
-              setContent(event.target.value)
-              markDocumentChanged()
-            }}
-            placeholder="Commencez à rédiger votre document..."
+            ref={richEditorRef}
+            contentEditable
+            role="textbox"
+            aria-label="Contenu du document"
+            aria-multiline="true"
+            data-placeholder="Commencez à rédiger votre document..."
+            suppressContentEditableWarning
+            onInput={updateContentFromEditor}
+            onKeyDown={handleEditorShortcut}
+            onPaste={handleEditorPaste}
           />
         </div>
       </form>

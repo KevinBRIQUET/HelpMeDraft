@@ -1,7 +1,10 @@
 import json
+import hashlib
 import os
 import re
+import smtplib
 from datetime import timedelta
+from email.message import EmailMessage
 from functools import wraps
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -10,6 +13,7 @@ import mysql.connector
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
@@ -41,6 +45,73 @@ def get_db_connection():
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
     )
+
+
+# Validation commune des mots de passe
+def password_is_secure(password):
+    return (
+        len(password) >= 8
+        and any(character.islower() for character in password)
+        and any(character.isupper() for character in password)
+        and any(character.isdigit() for character in password)
+    )
+
+
+# Réinitialisation sécurisée du mot de passe
+def create_password_reset_token(user_id, password_hash):
+    serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    password_fingerprint = hashlib.sha256(
+        password_hash.encode("utf-8"),
+    ).hexdigest()
+
+    return serializer.dumps(
+        {
+            "user_id": user_id,
+            "password_fingerprint": password_fingerprint,
+        },
+        salt="password-reset",
+    )
+
+
+def read_password_reset_token(token):
+    serializer = URLSafeTimedSerializer(app.config["SECRET_KEY"])
+    return serializer.loads(
+        token,
+        salt="password-reset",
+        max_age=1800,
+    )
+
+
+def send_password_reset_email(recipient, reset_url):
+    smtp_host = os.getenv("SMTP_HOST")
+
+    if not smtp_host:
+        return False
+
+    message = EmailMessage()
+    message["Subject"] = "Réinitialisation de votre mot de passe HelpMeDraft"
+    message["From"] = os.getenv("SMTP_FROM", "noreply@helpmedraft.local")
+    message["To"] = recipient
+    message.set_content(
+        "Une réinitialisation de mot de passe a été demandée.\n\n"
+        f"Ouvrez ce lien dans les 30 minutes : {reset_url}\n\n"
+        "Si vous n'êtes pas à l'origine de cette demande, ignorez cet e-mail."
+    )
+
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as smtp:
+        if os.getenv("SMTP_USE_TLS", "true").lower() == "true":
+            smtp.starttls()
+
+        smtp_user = os.getenv("SMTP_USER")
+        smtp_password = os.getenv("SMTP_PASSWORD")
+
+        if smtp_user and smtp_password:
+            smtp.login(smtp_user, smtp_password)
+
+        smtp.send_message(message)
+
+    return True
 
 
 # Communication avec le modèle local Ollama
@@ -131,8 +202,9 @@ AI_ACTIONS = {
         "prompt": (
             "Tu es le correcteur de HelpMeDraft. Corrige uniquement "
             "l'orthographe, la grammaire, la conjugaison et la ponctuation "
-            "du texte. Conserve son sens et son ton. Retourne uniquement "
-            "le texte corrigé, sans explication."
+            "du texte. Conserve son sens, son ton et toute mise en forme "
+            "Markdown existante. Retourne uniquement le texte corrigé, "
+            "sans explication."
         ),
     },
     "rephrase": {
@@ -141,8 +213,8 @@ AI_ACTIONS = {
         "prompt": (
             "Tu es l'assistant de rédaction de HelpMeDraft. Reformule le "
             "texte dans un style professionnel, clair et naturel. Conserve "
-            "toutes les informations et le sens d'origine. Retourne "
-            "uniquement le texte reformulé, sans explication."
+            "toutes les informations, le sens d'origine et la mise en forme "
+            "Markdown. Retourne uniquement le texte reformulé, sans explication."
         ),
     },
     "complete": {
@@ -152,22 +224,86 @@ AI_ACTIONS = {
             "Tu es l'assistant de rédaction de HelpMeDraft. Continue le "
             "texte de façon cohérente et professionnelle avec un court "
             "paragraphe. Retourne le texte original inchangé suivi de ta "
-            "continuation, sans titre ni explication."
+            "continuation, en conservant sa mise en forme Markdown, sans titre "
+            "ni explication."
         ),
     },
 }
 
 
 # Protection des routes réservées aux utilisateurs connectés
+def account_is_active(user_id):
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT actif
+        FROM utilisateur
+        WHERE Id_utilisateur = %s
+        """,
+        (user_id,),
+    )
+    user = cursor.fetchone()
+    cursor.close()
+    connection.close()
+
+    return user is not None and bool(user["actif"])
+
+
 def login_required(route):
     @wraps(route)
     def protected_route(*args, **kwargs):
-        if session.get("user_id") is None:
+        user_id = session.get("user_id")
+
+        if user_id is None:
             return jsonify({"message": "Authentification requise"}), 401
+
+        if not account_is_active(user_id):
+            session.clear()
+            return jsonify({"message": "Ce compte a été désactivé"}), 403
 
         return route(*args, **kwargs)
 
     return protected_route
+
+
+# Protection supplémentaire des routes du back-office
+def admin_required(route):
+    @wraps(route)
+    def protected_admin_route(*args, **kwargs):
+        user_id = session.get("user_id")
+
+        if user_id is None:
+            return jsonify({"message": "Authentification requise"}), 401
+
+        connection = get_db_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT role, actif
+            FROM utilisateur
+            WHERE Id_utilisateur = %s
+            """,
+            (user_id,),
+        )
+        user = cursor.fetchone()
+        cursor.close()
+        connection.close()
+
+        if user is None:
+            session.clear()
+            return jsonify({"message": "Utilisateur introuvable"}), 401
+
+        if not user.get("actif", 1):
+            session.clear()
+            return jsonify({"message": "Ce compte a été désactivé"}), 403
+
+        if not user["role"]:
+            return jsonify({"message": "Accès administrateur requis"}), 403
+
+        return route(*args, **kwargs)
+
+    return protected_admin_route
 
 
 # Routes de diagnostic
@@ -251,14 +387,7 @@ def register():
     if password != password_confirmation:
         return jsonify({"message": "Les mots de passe ne correspondent pas"}), 400
 
-    password_is_valid = (
-        len(password) >= 8
-        and any(character.islower() for character in password)
-        and any(character.isupper() for character in password)
-        and any(character.isdigit() for character in password)
-    )
-
-    if not password_is_valid:
+    if not password_is_secure(password):
         return jsonify({
             "message": (
                 "Le mot de passe doit contenir au moins 8 caractères, "
@@ -315,6 +444,130 @@ def register():
     }), 201
 
 
+@app.post("/api/forgot-password")
+def forgot_password():
+    data = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip().lower()
+
+    if not email or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return jsonify({"message": "Adresse e-mail invalide"}), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT Id_utilisateur, email, mot_de_passe_hash
+        FROM utilisateur
+        WHERE email = %s
+        """,
+        (email,),
+    )
+    user = cursor.fetchone()
+    cursor.close()
+    connection.close()
+
+    response_data = {
+        "message": (
+            "Si un compte correspond à cette adresse, "
+            "un lien de réinitialisation a été généré."
+        ),
+    }
+
+    if user is not None:
+        token = create_password_reset_token(
+            user["Id_utilisateur"],
+            user["mot_de_passe_hash"],
+        )
+        frontend_url = os.getenv("FRONTEND_URL", "http://localhost:5173")
+        reset_url = f"{frontend_url}/reset-password?token={token}"
+
+        try:
+            email_sent = send_password_reset_email(user["email"], reset_url)
+        except (OSError, smtplib.SMTPException):
+            app.logger.exception("Échec de l'envoi de l'e-mail de réinitialisation")
+            email_sent = False
+
+        # En développement, le lien permet de tester sans serveur SMTP.
+        if not email_sent and os.getenv("APP_ENV") != "production":
+            response_data["development_reset_url"] = reset_url
+
+    return jsonify(response_data), 200
+
+
+@app.post("/api/reset-password")
+def reset_password():
+    data = request.get_json(silent=True) or {}
+    token = data.get("token", "")
+    password = data.get("password", "")
+    password_confirmation = data.get("passwordConfirmation", "")
+
+    if not token or not password or not password_confirmation:
+        return jsonify({"message": "Tous les champs sont obligatoires"}), 400
+
+    if password != password_confirmation:
+        return jsonify({"message": "Les mots de passe ne correspondent pas"}), 400
+
+    if not password_is_secure(password):
+        return jsonify({
+            "message": (
+                "Le mot de passe doit contenir au moins 8 caractères, "
+                "une majuscule, une minuscule et un chiffre"
+            ),
+        }), 400
+
+    try:
+        token_data = read_password_reset_token(token)
+    except (BadSignature, SignatureExpired):
+        return jsonify({
+            "message": "Ce lien est invalide ou a expiré",
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT Id_utilisateur, mot_de_passe_hash
+        FROM utilisateur
+        WHERE Id_utilisateur = %s
+        """,
+        (token_data["user_id"],),
+    )
+    user = cursor.fetchone()
+
+    current_fingerprint = (
+        hashlib.sha256(user["mot_de_passe_hash"].encode("utf-8")).hexdigest()
+        if user is not None
+        else ""
+    )
+
+    if (
+        user is None
+        or current_fingerprint != token_data.get("password_fingerprint")
+    ):
+        cursor.close()
+        connection.close()
+        return jsonify({
+            "message": "Ce lien est invalide ou a déjà été utilisé",
+        }), 400
+
+    cursor.execute(
+        """
+        UPDATE utilisateur
+        SET mot_de_passe_hash = %s
+        WHERE Id_utilisateur = %s
+        """,
+        (generate_password_hash(password), user["Id_utilisateur"]),
+    )
+    connection.commit()
+    cursor.close()
+    connection.close()
+    session.clear()
+
+    return jsonify({
+        "message": "Mot de passe modifié avec succès",
+    }), 200
+
+
 @app.post("/api/login")
 def login():
     data = request.get_json(silent=True) or {}
@@ -330,7 +583,14 @@ def login():
 
     cursor.execute(
         """
-        SELECT Id_utilisateur, nom, prenom, email, mot_de_passe_hash, role
+        SELECT
+            Id_utilisateur,
+            nom,
+            prenom,
+            email,
+            mot_de_passe_hash,
+            role,
+            actif
         FROM utilisateur
         WHERE email = %s
         """,
@@ -346,6 +606,9 @@ def login():
         user["mot_de_passe_hash"], password
     ):
         return jsonify({"message": "Identifiants incorrects"}), 401
+
+    if not user.get("actif", 1):
+        return jsonify({"message": "Ce compte a été désactivé"}), 403
 
     session.clear()
     session.permanent = True
@@ -374,7 +637,7 @@ def get_current_user():
 
     cursor.execute(
         """
-        SELECT Id_utilisateur, nom, prenom, email, role
+        SELECT Id_utilisateur, nom, prenom, email, role, actif
         FROM utilisateur
         WHERE Id_utilisateur = %s
         """,
@@ -389,6 +652,10 @@ def get_current_user():
     if user is None:
         session.clear()
         return jsonify({"message": "Utilisateur introuvable"}), 401
+
+    if not user.get("actif", 1):
+        session.clear()
+        return jsonify({"message": "Ce compte a été désactivé"}), 403
 
     return jsonify({
         "user": {
@@ -441,6 +708,180 @@ def get_dashboard_summary():
         return jsonify({"message": "Utilisateur introuvable"}), 401
 
     return jsonify({"summary": summary}), 200
+
+
+@app.get("/api/sidebar-recents")
+@login_required
+def get_sidebar_recents():
+    user_id = session.get("user_id")
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+
+    cursor.execute(
+        """
+        SELECT
+            doc.Id_document AS id,
+            doc.titre,
+            doc.Id_dossier AS dossier_id,
+            d.nom AS dossier_nom
+        FROM document doc
+        LEFT JOIN dossier d ON d.Id_dossier = doc.Id_dossier
+        WHERE doc.Id_utilisateur = %s
+        ORDER BY doc.derniere_modification DESC, doc.Id_document DESC
+        LIMIT 5
+        """,
+        (user_id,),
+    )
+    recent_documents = cursor.fetchall()
+
+    cursor.close()
+    connection.close()
+
+    return jsonify({"documents": recent_documents}), 200
+
+
+# Back-office administrateur
+@app.get("/api/admin/summary")
+@admin_required
+def get_admin_summary():
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM utilisateur) AS nombre_utilisateurs,
+            (SELECT COUNT(*) FROM utilisateur WHERE actif = 1)
+                AS nombre_utilisateurs_actifs,
+            (SELECT COUNT(*) FROM utilisateur WHERE actif = 0)
+                AS nombre_utilisateurs_inactifs,
+            (SELECT COUNT(*) FROM utilisateur WHERE role = 1)
+                AS nombre_administrateurs,
+            (SELECT COUNT(*) FROM document) AS nombre_documents,
+            (SELECT COUNT(*) FROM dossier) AS nombre_dossiers,
+            (SELECT COUNT(*) FROM interaction) AS nombre_interactions
+        """
+    )
+    summary = cursor.fetchone()
+    cursor.close()
+    connection.close()
+
+    return jsonify({"summary": summary}), 200
+
+
+@app.get("/api/admin/users")
+@admin_required
+def get_admin_users():
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT
+            u.Id_utilisateur AS id,
+            u.nom,
+            u.prenom,
+            u.email,
+            u.role,
+            u.actif,
+            u.quota_restant,
+            DATE_FORMAT(u.date_inscription, '%d/%m/%Y') AS date_inscription,
+            COUNT(DISTINCT d.Id_dossier) AS nombre_dossiers,
+            COUNT(DISTINCT doc.Id_document) AS nombre_documents
+        FROM utilisateur u
+        LEFT JOIN dossier d ON d.Id_utilisateur = u.Id_utilisateur
+        LEFT JOIN document doc ON doc.Id_utilisateur = u.Id_utilisateur
+        GROUP BY
+            u.Id_utilisateur,
+            u.nom,
+            u.prenom,
+            u.email,
+            u.role,
+            u.actif,
+            u.quota_restant,
+            u.date_inscription
+        ORDER BY u.date_inscription DESC, u.Id_utilisateur DESC
+        """
+    )
+    users = cursor.fetchall()
+    cursor.close()
+    connection.close()
+
+    return jsonify({"users": users}), 200
+
+
+@app.patch("/api/admin/users/<int:user_id>")
+@admin_required
+def update_admin_user(user_id):
+    data = request.get_json(silent=True) or {}
+    role = data.get("role")
+    quota = data.get("quota")
+    active = data.get("active")
+
+    if isinstance(role, bool):
+        role = int(role)
+
+    if not isinstance(role, int) or role not in (0, 1):
+        return jsonify({"message": "Le rôle sélectionné est invalide"}), 400
+
+    if isinstance(quota, bool) or not isinstance(quota, int):
+        return jsonify({"message": "Le quota doit être un nombre entier"}), 400
+
+    if quota < 0 or quota > 1000:
+        return jsonify({
+            "message": "Le quota doit être compris entre 0 et 1000",
+        }), 400
+
+    if isinstance(active, bool):
+        active = int(active)
+
+    if not isinstance(active, int) or active not in (0, 1):
+        return jsonify({"message": "Le statut sélectionné est invalide"}), 400
+
+    if user_id == session.get("user_id") and (role == 0 or active == 0):
+        return jsonify({
+            "message": (
+                "Vous ne pouvez pas retirer votre rôle administrateur "
+                "ou désactiver votre propre compte"
+            ),
+        }), 400
+
+    connection = get_db_connection()
+    cursor = connection.cursor(dictionary=True)
+    cursor.execute(
+        """
+        SELECT Id_utilisateur
+        FROM utilisateur
+        WHERE Id_utilisateur = %s
+        """,
+        (user_id,),
+    )
+
+    if cursor.fetchone() is None:
+        cursor.close()
+        connection.close()
+        return jsonify({"message": "Utilisateur introuvable"}), 404
+
+    cursor.execute(
+        """
+        UPDATE utilisateur
+        SET role = %s, quota_restant = %s, actif = %s
+        WHERE Id_utilisateur = %s
+        """,
+        (role, quota, active, user_id),
+    )
+    connection.commit()
+    cursor.close()
+    connection.close()
+
+    return jsonify({
+        "message": "Compte mis à jour",
+        "user": {
+            "id": user_id,
+            "role": role,
+            "quota_restant": quota,
+            "actif": active,
+        },
+    }), 200
 
 
 # Gestion des dossiers

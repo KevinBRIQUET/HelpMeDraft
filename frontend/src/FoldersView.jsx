@@ -3,6 +3,7 @@ import { useEffect, useState } from "react"
 function FoldersView({
   onFolderCreated,
   onFolderDeleted,
+  onFolderUpdated,
   onSessionExpired,
 }) {
   // État local de la page dossiers.
@@ -23,7 +24,7 @@ function FoldersView({
           credentials: "include",
         })
 
-        if (response.status === 401) {
+        if ([401, 403].includes(response.status)) {
           onSessionExpired()
           return
         }
@@ -77,7 +78,7 @@ function FoldersView({
 
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -134,7 +135,7 @@ function FoldersView({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }
@@ -153,6 +154,7 @@ function FoldersView({
       )
       cancelEditing()
       setMessage("Dossier renommé avec succès")
+      onFolderUpdated()
     } catch {
       setMessage("Le serveur est inaccessible.")
     } finally {
@@ -179,7 +181,7 @@ function FoldersView({
       )
       const data = await response.json()
 
-      if (response.status === 401) {
+      if ([401, 403].includes(response.status)) {
         onSessionExpired()
         return
       }

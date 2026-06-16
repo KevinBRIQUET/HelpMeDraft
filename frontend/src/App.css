@@ -180,6 +180,22 @@
   outline-offset: 2px;
 }
 
+.auth-back-button {
+  border: 0;
+  margin: 0 0 26px;
+  padding: 7px 0;
+  color: #40667a;
+  background: transparent;
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 740;
+  cursor: pointer;
+}
+
+.auth-back-button:hover {
+  color: #0f746b;
+}
+
 .form-heading {
   margin-bottom: 36px;
 }
@@ -344,6 +360,25 @@ form {
   accent-color: #168a80;
 }
 
+.forgot-password-button {
+  width: fit-content;
+  justify-self: end;
+  border: 0;
+  margin-top: -10px;
+  padding: 4px 0;
+  color: #177a72;
+  background: transparent;
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.forgot-password-button:hover {
+  color: #0b4e49;
+  text-decoration: underline;
+}
+
 .submit-button {
   display: flex;
   width: 100%;
@@ -416,6 +451,28 @@ form {
   border-color: #efc6c3;
   color: #9e322b;
   background: #fff3f2;
+}
+
+.development-reset-link {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #74c8bd;
+  border-radius: 10px;
+  margin-top: 12px;
+  padding: 10px 14px;
+  color: #0d625b;
+  background: #e8f8f5;
+  font-size: 0.8rem;
+  font-weight: 780;
+  text-align: center;
+  text-decoration: none;
+}
+
+.development-reset-link:hover {
+  border-color: #168a80;
+  background: #dbf3ef;
 }
 
 .privacy-note {

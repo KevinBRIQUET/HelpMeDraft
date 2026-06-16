@@ -8,6 +8,7 @@ from app import (
     app,
     call_ollama,
     clean_ollama_answer,
+    create_password_reset_token,
 )
 
 
@@ -20,6 +21,14 @@ class AuthenticationTestCase(unittest.TestCase):
             SESSION_COOKIE_SECURE=False,
         )
         self.client = app.test_client()
+        self.active_account_patcher = patch(
+            "app.account_is_active",
+            return_value=True,
+        )
+        self.mocked_active_account = self.active_account_patcher.start()
+
+    def tearDown(self):
+        self.active_account_patcher.stop()
 
     @staticmethod
     def create_fake_connection(result):
@@ -40,6 +49,107 @@ class AuthenticationTestCase(unittest.TestCase):
             response.get_json()["message"],
             "Email et mot de passe obligatoires",
         )
+
+    @patch("app.send_password_reset_email", return_value=False)
+    @patch("app.get_db_connection")
+    def test_forgot_password_returns_development_link(
+        self,
+        mocked_connection,
+        mocked_email,
+    ):
+        password_hash = generate_password_hash("Ancien123")
+        mocked_connection.return_value = self.create_fake_connection({
+            "Id_utilisateur": 7,
+            "email": "test@helpmedraft.fr",
+            "mot_de_passe_hash": password_hash,
+        })
+
+        response = self.client.post(
+            "/api/forgot-password",
+            json={"email": "test@helpmedraft.fr"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            "development_reset_url",
+            response.get_json(),
+        )
+        self.assertIn(
+            "/reset-password?token=",
+            response.get_json()["development_reset_url"],
+        )
+        mocked_email.assert_called_once()
+
+    @patch("app.send_password_reset_email")
+    @patch("app.get_db_connection")
+    def test_forgot_password_hides_unknown_email(
+        self,
+        mocked_connection,
+        mocked_email,
+    ):
+        mocked_connection.return_value = self.create_fake_connection(None)
+
+        response = self.client.post(
+            "/api/forgot-password",
+            json={"email": "inconnu@helpmedraft.fr"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("development_reset_url", response.get_json())
+        mocked_email.assert_not_called()
+
+    @patch("app.get_db_connection")
+    def test_reset_password_updates_hash(self, mocked_connection):
+        old_hash = generate_password_hash("Ancien123")
+        token = create_password_reset_token(7, old_hash)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = {
+            "Id_utilisateur": 7,
+            "mot_de_passe_hash": old_hash,
+        }
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        response = self.client.post(
+            "/api/reset-password",
+            json={
+                "token": token,
+                "password": "Nouveau123",
+                "passwordConfirmation": "Nouveau123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        new_hash, user_id = cursor.execute.call_args_list[1].args[1]
+        self.assertEqual(user_id, 7)
+        self.assertTrue(check_password_hash(new_hash, "Nouveau123"))
+        connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_reset_password_rejects_already_used_token(
+        self,
+        mocked_connection,
+    ):
+        old_hash = generate_password_hash("Ancien123")
+        token = create_password_reset_token(7, old_hash)
+        mocked_connection.return_value = self.create_fake_connection({
+            "Id_utilisateur": 7,
+            "mot_de_passe_hash": generate_password_hash("Autre123"),
+        })
+
+        response = self.client.post(
+            "/api/reset-password",
+            json={
+                "token": token,
+                "password": "Nouveau123",
+                "passwordConfirmation": "Nouveau123",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("déjà été utilisé", response.get_json()["message"])
+        mocked_connection.return_value.commit.assert_not_called()
 
     def test_ollama_answer_hides_model_thinking(self):
         raw_answer = (
@@ -107,6 +217,7 @@ class AuthenticationTestCase(unittest.TestCase):
             "email": "test@helpmedraft.fr",
             "mot_de_passe_hash": generate_password_hash("Test1234!"),
             "role": 0,
+            "actif": 1,
         }
         mocked_connection.return_value = self.create_fake_connection(user)
 
@@ -130,6 +241,7 @@ class AuthenticationTestCase(unittest.TestCase):
             "email": "test@helpmedraft.fr",
             "mot_de_passe_hash": generate_password_hash("Test1234!"),
             "role": 0,
+            "actif": 1,
         }
         mocked_connection.return_value = self.create_fake_connection(user)
 
@@ -146,6 +258,33 @@ class AuthenticationTestCase(unittest.TestCase):
 
         with self.client.session_transaction() as session_data:
             self.assertEqual(session_data["user_id"], 1)
+
+    @patch("app.get_db_connection")
+    def test_login_rejects_inactive_account(self, mocked_connection):
+        user = {
+            "Id_utilisateur": 1,
+            "nom": "Test",
+            "prenom": "Kevin",
+            "email": "test@helpmedraft.fr",
+            "mot_de_passe_hash": generate_password_hash("Test1234!"),
+            "role": 0,
+            "actif": 0,
+        }
+        mocked_connection.return_value = self.create_fake_connection(user)
+
+        response = self.client.post(
+            "/api/login",
+            json={
+                "email": "test@helpmedraft.fr",
+                "password": "Test1234!",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["message"],
+            "Ce compte a été désactivé",
+        )
 
     # Création d'un compte
     def test_register_rejects_weak_password(self):
@@ -249,6 +388,213 @@ class AuthenticationTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["summary"], summary)
+
+    @patch("app.get_db_connection")
+    def test_admin_summary_rejects_standard_user(self, mocked_connection):
+        mocked_connection.return_value = self.create_fake_connection({
+            "role": 0,
+        })
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/admin/summary")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["message"],
+            "Accès administrateur requis",
+        )
+
+    @patch("app.get_db_connection")
+    def test_admin_summary_returns_global_statistics(
+        self,
+        mocked_connection,
+    ):
+        admin_connection = self.create_fake_connection({"role": 1})
+        summary_connection = self.create_fake_connection({
+            "nombre_utilisateurs": 4,
+            "nombre_administrateurs": 1,
+            "nombre_documents": 12,
+            "nombre_dossiers": 6,
+            "nombre_interactions": 8,
+        })
+        mocked_connection.side_effect = [
+            admin_connection,
+            summary_connection,
+        ]
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.get("/api/admin/summary")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["summary"]["nombre_utilisateurs"],
+            4,
+        )
+
+    @patch("app.get_db_connection")
+    def test_admin_users_returns_registered_accounts(
+        self,
+        mocked_connection,
+    ):
+        admin_connection = self.create_fake_connection({"role": 1})
+        users_cursor = MagicMock()
+        users_cursor.fetchall.return_value = [
+            {
+                "id": 1,
+                "nom": "Admin",
+                "prenom": "Kevin",
+                "email": "admin@helpmedraft.fr",
+                "role": 1,
+                "actif": 1,
+                "quota_restant": 20,
+                "date_inscription": "15/06/2026",
+                "nombre_dossiers": 2,
+                "nombre_documents": 5,
+            },
+        ]
+        users_connection = MagicMock()
+        users_connection.cursor.return_value = users_cursor
+        mocked_connection.side_effect = [
+            admin_connection,
+            users_connection,
+        ]
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.get("/api/admin/users")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.get_json()["users"]), 1)
+        self.assertEqual(
+            response.get_json()["users"][0]["email"],
+            "admin@helpmedraft.fr",
+        )
+
+    @patch("app.get_db_connection")
+    def test_admin_can_update_user_role_and_quota(self, mocked_connection):
+        admin_connection = self.create_fake_connection({"role": 1})
+        update_cursor = MagicMock()
+        update_cursor.fetchone.return_value = {"Id_utilisateur": 7}
+        update_connection = MagicMock()
+        update_connection.cursor.return_value = update_cursor
+        mocked_connection.side_effect = [
+            admin_connection,
+            update_connection,
+        ]
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.patch(
+            "/api/admin/users/7",
+            json={"role": 1, "quota": 50, "active": 1},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            update_cursor.execute.call_args_list[1].args[1],
+            (1, 50, 1, 7),
+        )
+        update_connection.commit.assert_called_once()
+
+    @patch("app.get_db_connection")
+    def test_admin_cannot_remove_own_role(self, mocked_connection):
+        mocked_connection.return_value = self.create_fake_connection({
+            "role": 1,
+        })
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.patch(
+            "/api/admin/users/1",
+            json={"role": 0, "quota": 20, "active": 1},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("rôle administrateur", response.get_json()["message"])
+
+    @patch("app.get_db_connection")
+    def test_admin_update_rejects_invalid_quota(self, mocked_connection):
+        mocked_connection.return_value = self.create_fake_connection({
+            "role": 1,
+        })
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.patch(
+            "/api/admin/users/7",
+            json={"role": 0, "quota": 1001, "active": 1},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("entre 0 et 1000", response.get_json()["message"])
+
+    @patch("app.get_db_connection")
+    def test_admin_cannot_deactivate_own_account(self, mocked_connection):
+        mocked_connection.return_value = self.create_fake_connection({
+            "role": 1,
+            "actif": 1,
+        })
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 1
+
+        response = self.client.patch(
+            "/api/admin/users/1",
+            json={"role": 1, "quota": 20, "active": 0},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("désactiver", response.get_json()["message"])
+
+    def test_inactive_session_is_rejected(self):
+        self.mocked_active_account.return_value = False
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/dashboard-summary")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["message"],
+            "Ce compte a été désactivé",
+        )
+
+    @patch("app.get_db_connection")
+    def test_sidebar_recents_are_limited_to_connected_user(
+        self,
+        mocked_connection,
+    ):
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [
+            {
+                "id": 9,
+                "titre": "Compte rendu",
+                "dossier_id": 4,
+                "dossier_nom": "Travail",
+            },
+        ]
+        connection = MagicMock()
+        connection.cursor.return_value = cursor
+        mocked_connection.return_value = connection
+
+        with self.client.session_transaction() as session_data:
+            session_data["user_id"] = 7
+
+        response = self.client.get("/api/sidebar-recents")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["documents"][0]["id"], 9)
+        self.assertNotIn("folders", response.get_json())
+        self.assertEqual(cursor.execute.call_args.args[1], (7,))
 
     @patch("app.get_db_connection")
     def test_folders_are_limited_to_connected_user(self, mocked_connection):

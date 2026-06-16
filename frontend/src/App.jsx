@@ -4,7 +4,15 @@ import Dashboard from "./Dashboard"
 
 function App() {
   // Données du formulaire et état de l'interface
-  const [authMode, setAuthMode] = useState("login")
+  const [resetToken] = useState(
+    () => new URLSearchParams(window.location.search).get("token") ?? "",
+  )
+  const [authMode, setAuthMode] = useState(
+    () =>
+      window.location.pathname === "/reset-password" && resetToken
+        ? "reset"
+        : "login",
+  )
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [email, setEmail] = useState("")
@@ -16,6 +24,7 @@ function App() {
   const [isSuccess, setIsSuccess] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [user, setUser] = useState(null)
+  const [developmentResetUrl, setDevelopmentResetUrl] = useState("")
 
   const handleSessionExpired = useCallback(() => {
     setUser(null)
@@ -24,6 +33,10 @@ function App() {
   // Vérifie si une session existe déjà lors du chargement de la page.
   useEffect(() => {
     async function checkSession() {
+      if (resetToken) {
+        return
+      }
+
       try {
         const response = await fetch("http://localhost:5000/api/me", {
           credentials: "include",
@@ -41,7 +54,7 @@ function App() {
     }
 
     checkSession()
-  }, [])
+  }, [resetToken])
 
   // Bascule entre connexion et inscription en réinitialisant le formulaire.
   function changeAuthMode(mode) {
@@ -55,19 +68,41 @@ function App() {
     setMessage("")
     setIsSuccess(false)
     setShowPassword(false)
+    setDevelopmentResetUrl("")
+
+    if (mode !== "reset") {
+      window.history.replaceState({}, "", "/")
+    }
   }
 
   // Envoie les données au bon endpoint selon le formulaire affiché.
   async function handleSubmit(event) {
     event.preventDefault()
     const isRegistering = authMode === "register"
+    const isForgottenPassword = authMode === "forgot"
+    const isResettingPassword = authMode === "reset"
 
-    setMessage(isRegistering ? "Création du compte..." : "Connexion en cours...")
+    setMessage(
+      isRegistering
+        ? "Création du compte..."
+        : isForgottenPassword
+          ? "Création du lien..."
+          : isResettingPassword
+            ? "Modification du mot de passe..."
+            : "Connexion en cours...",
+    )
     setIsLoading(true)
     setIsSuccess(false)
+    setDevelopmentResetUrl("")
 
     try {
-      const endpoint = isRegistering ? "/api/register" : "/api/login"
+      const endpoint = isRegistering
+        ? "/api/register"
+        : isForgottenPassword
+          ? "/api/forgot-password"
+          : isResettingPassword
+            ? "/api/reset-password"
+            : "/api/login"
       const body = isRegistering
         ? {
             prenom: firstName,
@@ -77,7 +112,11 @@ function App() {
             passwordConfirmation,
             consent,
           }
-        : { email, password }
+        : isForgottenPassword
+          ? { email }
+          : isResettingPassword
+            ? { token: resetToken, password, passwordConfirmation }
+            : { email, password }
 
       const response = await fetch(`http://localhost:5000${endpoint}`, {
         method: "POST",
@@ -92,10 +131,21 @@ function App() {
       setMessage(data.message)
       setIsSuccess(response.ok)
 
-      if (response.ok) {
+      if (response.ok && data.development_reset_url) {
+        setDevelopmentResetUrl(data.development_reset_url)
+      }
+
+      if (response.ok && (authMode === "login" || isRegistering)) {
         setUser(data.user)
         setPassword("")
         setMessage("")
+      }
+
+      if (response.ok && isResettingPassword) {
+        setAuthMode("login")
+        setPassword("")
+        setPasswordConfirmation("")
+        window.history.replaceState({}, "", "/")
       }
     } catch {
       setMessage("Le serveur est inaccessible")
@@ -148,6 +198,13 @@ function App() {
     )
   }
 
+  const isForgottenPassword = authMode === "forgot"
+  const isResettingPassword = authMode === "reset"
+  const displaysEmail = !isResettingPassword
+  const displaysPassword = !isForgottenPassword
+  const displaysPasswordConfirmation =
+    authMode === "register" || isResettingPassword
+
   return (
     <main className="login-page">
       <section className="brand-panel" aria-label="Présentation de HelpMeDraft">
@@ -186,6 +243,17 @@ function App() {
 
         <div className="login-card">
           <>
+            {(isForgottenPassword || isResettingPassword) && (
+              <button
+                className="auth-back-button"
+                type="button"
+                onClick={() => changeAuthMode("login")}
+              >
+                ← Retour à la connexion
+              </button>
+            )}
+
+            {!isForgottenPassword && !isResettingPassword && (
               <div className="auth-tabs" aria-label="Choix du formulaire">
                 <button
                   type="button"
@@ -204,18 +272,27 @@ function App() {
                   Créer un compte
                 </button>
               </div>
+            )}
 
               <div className="form-heading">
                 <p className="eyebrow">Espace personnel</p>
                 <h2>
                   {authMode === "login"
                     ? "Bon retour parmi nous"
-                    : "Créez votre espace"}
+                    : authMode === "register"
+                      ? "Créez votre espace"
+                      : isForgottenPassword
+                        ? "Mot de passe oublié"
+                        : "Choisissez un nouveau mot de passe"}
                 </h2>
                 <p>
                   {authMode === "login"
                     ? "Connectez-vous pour retrouver vos documents."
-                    : "Commencez à rédiger et organiser vos documents."}
+                    : authMode === "register"
+                      ? "Commencez à rédiger et organiser vos documents."
+                      : isForgottenPassword
+                        ? "Saisissez votre adresse pour recevoir un lien temporaire."
+                        : "Ce lien est valable pendant 30 minutes et une seule fois."}
                 </p>
               </div>
 
@@ -261,63 +338,71 @@ function App() {
                   </div>
                 )}
 
-                <div className="field">
-                  <label htmlFor="email">Adresse e-mail</label>
-                  <div className="input-wrapper">
-                    <span className="input-icon" aria-hidden="true">@</span>
-                    <input
-                      id="email"
-                      name="email"
-                      type="email"
-                      autoComplete="email"
-                      placeholder="vous@exemple.fr"
-                      value={email}
-                      onChange={(event) => setEmail(event.target.value)}
-                      required
-                    />
+                {displaysEmail && (
+                  <div className="field">
+                    <label htmlFor="email">Adresse e-mail</label>
+                    <div className="input-wrapper">
+                      <span className="input-icon" aria-hidden="true">@</span>
+                      <input
+                        id="email"
+                        name="email"
+                        type="email"
+                        autoComplete="email"
+                        placeholder="vous@exemple.fr"
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                        required
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div className="field">
-                  <label htmlFor="password">Mot de passe</label>
-                  <div className="input-wrapper">
-                    <span className="input-icon lock-icon" aria-hidden="true" />
-                    <input
-                      id="password"
-                      name="password"
-                      type={showPassword ? "text" : "password"}
-                      autoComplete={
-                        authMode === "register"
-                          ? "new-password"
-                          : "current-password"
-                      }
-                      placeholder="Votre mot de passe"
-                      minLength={authMode === "register" ? 8 : undefined}
-                      value={password}
-                      onChange={(event) => setPassword(event.target.value)}
-                      required
-                    />
-                    <button
-                      className="password-toggle"
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      aria-label={
-                        showPassword
-                          ? "Masquer le mot de passe"
-                          : "Afficher le mot de passe"
-                      }
-                    >
-                      {showPassword ? "Masquer" : "Afficher"}
-                    </button>
+                {displaysPassword && (
+                  <div className="field">
+                    <label htmlFor="password">
+                      {isResettingPassword
+                        ? "Nouveau mot de passe"
+                        : "Mot de passe"}
+                    </label>
+                    <div className="input-wrapper">
+                      <span className="input-icon lock-icon" aria-hidden="true" />
+                      <input
+                        id="password"
+                        name="password"
+                        type={showPassword ? "text" : "password"}
+                        autoComplete={
+                          authMode === "login"
+                            ? "current-password"
+                            : "new-password"
+                        }
+                        placeholder="Votre mot de passe"
+                        minLength={authMode === "login" ? undefined : 8}
+                        value={password}
+                        onChange={(event) => setPassword(event.target.value)}
+                        required
+                      />
+                      <button
+                        className="password-toggle"
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        aria-label={
+                          showPassword
+                            ? "Masquer le mot de passe"
+                            : "Afficher le mot de passe"
+                        }
+                      >
+                        {showPassword ? "Masquer" : "Afficher"}
+                      </button>
+                    </div>
+                    {authMode !== "login" && (
+                      <p className="field-hint">
+                        8 caractères minimum, avec majuscule, minuscule et chiffre.
+                      </p>
+                    )}
                   </div>
-                  {authMode === "register" && (
-                    <p className="field-hint">
-                      8 caractères minimum, avec majuscule, minuscule et chiffre.
-                    </p>
-                  )}
-                </div>
+                )}
 
-                {authMode === "register" && (
+                {displaysPasswordConfirmation && (
                   <>
                     <div className="field">
                       <label htmlFor="passwordConfirmation">
@@ -344,19 +429,31 @@ function App() {
                       </div>
                     </div>
 
-                    <label className="consent-field">
-                      <input
-                        type="checkbox"
-                        checked={consent}
-                        onChange={(event) => setConsent(event.target.checked)}
-                        required
-                      />
-                      <span>
-                        J’accepte les conditions d’utilisation et le traitement
-                        de mes données pour créer mon compte.
-                      </span>
-                    </label>
+                    {authMode === "register" && (
+                      <label className="consent-field">
+                        <input
+                          type="checkbox"
+                          checked={consent}
+                          onChange={(event) => setConsent(event.target.checked)}
+                          required
+                        />
+                        <span>
+                          J’accepte les conditions d’utilisation et le traitement
+                          de mes données pour créer mon compte.
+                        </span>
+                      </label>
+                    )}
                   </>
+                )}
+
+                {authMode === "login" && (
+                  <button
+                    className="forgot-password-button"
+                    type="button"
+                    onClick={() => changeAuthMode("forgot")}
+                  >
+                    Mot de passe oublié ?
+                  </button>
                 )}
 
                 <button
@@ -367,10 +464,18 @@ function App() {
                   {isLoading
                     ? authMode === "register"
                       ? "Création..."
-                      : "Connexion..."
+                      : isForgottenPassword
+                        ? "Création du lien..."
+                        : isResettingPassword
+                          ? "Modification..."
+                          : "Connexion..."
                     : authMode === "register"
                       ? "Créer mon compte"
-                      : "Se connecter"}
+                      : isForgottenPassword
+                        ? "Générer le lien"
+                        : isResettingPassword
+                          ? "Modifier mon mot de passe"
+                          : "Se connecter"}
                   {!isLoading && <span aria-hidden="true">→</span>}
                 </button>
               </form>
@@ -385,6 +490,15 @@ function App() {
                 >
                   {message}
                 </p>
+              )}
+
+              {developmentResetUrl && (
+                <a
+                  className="development-reset-link"
+                  href={developmentResetUrl}
+                >
+                  Ouvrir le lien de réinitialisation
+                </a>
               )}
 
               <p className="privacy-note">

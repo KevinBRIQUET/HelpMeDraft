@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import "./Dashboard.css"
+import AdminView from "./AdminView"
 import DocumentEditor from "./DocumentEditor"
 import DocumentsView from "./DocumentsView"
 import FoldersView from "./FoldersView"
@@ -10,6 +11,33 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
   const [error, setError] = useState("")
   const [activeView, setActiveView] = useState("overview")
   const [activeDocumentId, setActiveDocumentId] = useState(null)
+  const [selectedFolderId, setSelectedFolderId] = useState(null)
+  const [recentDocuments, setRecentDocuments] = useState([])
+
+  const loadSidebarRecents = useCallback(async () => {
+    try {
+      const response = await fetch(
+        "http://localhost:5000/api/sidebar-recents",
+        {
+          credentials: "include",
+        },
+      )
+
+      if ([401, 403].includes(response.status)) {
+        onSessionExpired()
+        return
+      }
+
+      if (!response.ok) {
+        return
+      }
+
+      const data = await response.json()
+      setRecentDocuments(data.documents)
+    } catch {
+      // Les raccourcis sont secondaires et ne bloquent pas le tableau de bord.
+    }
+  }, [onSessionExpired])
 
   useEffect(() => {
     async function loadSummary() {
@@ -21,7 +49,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
           },
         )
 
-        if (response.status === 401) {
+        if ([401, 403].includes(response.status)) {
           onSessionExpired()
           return
         }
@@ -38,7 +66,10 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
     }
 
     loadSummary()
-  }, [onSessionExpired])
+    const recentsTimer = window.setTimeout(loadSidebarRecents, 0)
+
+    return () => window.clearTimeout(recentsTimer)
+  }, [loadSidebarRecents, onSessionExpired])
 
   function handleFolderCreated() {
     setSummary((currentSummary) => {
@@ -51,6 +82,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
         nombre_dossiers: currentSummary.nombre_dossiers + 1,
       }
     })
+    loadSidebarRecents()
   }
 
   function handleFolderDeleted() {
@@ -64,6 +96,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
         nombre_dossiers: Math.max(currentSummary.nombre_dossiers - 1, 0),
       }
     })
+    loadSidebarRecents()
   }
 
   function handleDocumentCreated() {
@@ -77,6 +110,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
         nombre_documents: currentSummary.nombre_documents + 1,
       }
     })
+    loadSidebarRecents()
   }
 
   function handleDocumentDeleted() {
@@ -90,6 +124,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
         nombre_documents: Math.max(currentSummary.nombre_documents - 1, 0),
       }
     })
+    loadSidebarRecents()
     showDocuments()
   }
 
@@ -114,6 +149,11 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
   function showDocuments() {
     setActiveDocumentId(null)
     setActiveView("documents")
+  }
+
+  function showAllDocuments() {
+    setSelectedFolderId(null)
+    showDocuments()
   }
 
   return (
@@ -142,7 +182,7 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
                 : ""
             }
             type="button"
-            onClick={showDocuments}
+            onClick={showAllDocuments}
           >
             <span aria-hidden="true">▤</span>
             Mes documents
@@ -155,7 +195,44 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
             <span aria-hidden="true">□</span>
             Mes dossiers
           </button>
+          {Boolean(user.role) && (
+            <button
+              className={activeView === "admin" ? "active" : ""}
+              type="button"
+              onClick={() => setActiveView("admin")}
+            >
+              <span aria-hidden="true">⚙</span>
+              Administration
+            </button>
+          )}
         </nav>
+
+        <div className="sidebar-recents">
+          <section>
+            <h2>Documents récents</h2>
+            {recentDocuments.length === 0 ? (
+              <p>Aucun document</p>
+            ) : (
+              <div className="sidebar-shortcuts">
+                {recentDocuments.map((document) => (
+                  <button
+                    type="button"
+                    key={document.id}
+                    onClick={() => openDocument(document.id)}
+                    title={document.titre}
+                  >
+                    <span aria-hidden="true">▤</span>
+                    <span>
+                      <strong>{document.titre}</strong>
+                      <small>{document.dossier_nom || "Sans dossier"}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
+
+        </div>
 
         <div className="sidebar-user">
           <div className="sidebar-avatar" aria-hidden="true">
@@ -268,10 +345,16 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
           </article>
             </section>
           </>
+        ) : activeView === "admin" && user.role ? (
+          <AdminView
+            currentUserId={user.id}
+            onSessionExpired={onSessionExpired}
+          />
         ) : activeView === "folders" ? (
           <FoldersView
             onFolderCreated={handleFolderCreated}
             onFolderDeleted={handleFolderDeleted}
+            onFolderUpdated={loadSidebarRecents}
             onSessionExpired={onSessionExpired}
           />
         ) : activeView === "editor" && activeDocumentId ? (
@@ -279,12 +362,15 @@ function Dashboard({ user, isLoggingOut, onLogout, onSessionExpired }) {
             documentId={activeDocumentId}
             onBack={showDocuments}
             onDeleted={handleDocumentDeleted}
+            onDocumentUpdated={loadSidebarRecents}
             onQuotaChanged={handleQuotaChanged}
             onSessionExpired={onSessionExpired}
           />
         ) : (
           <DocumentsView
+            filterFolderId={selectedFolderId}
             onDocumentCreated={handleDocumentCreated}
+            onFilterFolderChange={setSelectedFolderId}
             onOpenDocument={openDocument}
             onSessionExpired={onSessionExpired}
           />
